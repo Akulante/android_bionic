@@ -27,10 +27,13 @@
  */
 
 #include <stdio_ext.h>
+
+#include <errno.h>
 #include <stdlib.h>
 
+#include <async_safe/log.h>
+
 #include "local.h"
-#include "private/libc_logging.h"
 
 size_t __fbufsize(FILE* fp) {
   return fp->_bf._size;
@@ -74,28 +77,16 @@ void _flushlbf() {
 }
 
 int __fsetlocking(FILE* fp, int type) {
-  int old_state = _EXT(fp)->_stdio_handles_locking ? FSETLOCKING_INTERNAL : FSETLOCKING_BYCALLER;
+  int old_state = _EXT(fp)->_caller_handles_locking ? FSETLOCKING_BYCALLER : FSETLOCKING_INTERNAL;
   if (type == FSETLOCKING_QUERY) {
     return old_state;
   }
 
   if (type != FSETLOCKING_INTERNAL && type != FSETLOCKING_BYCALLER) {
     // The API doesn't let us report an error, so blow up.
-    __libc_fatal("Bad type (%d) passed to __fsetlocking", type);
+    async_safe_fatal("Bad type (%d) passed to __fsetlocking", type);
   }
 
-  _EXT(fp)->_stdio_handles_locking = (type == FSETLOCKING_INTERNAL);
+  _EXT(fp)->_caller_handles_locking = (type == FSETLOCKING_BYCALLER);
   return old_state;
-}
-
-void clearerr_unlocked(FILE* fp) {
-  return __sclearerr(fp);
-}
-
-int feof_unlocked(FILE* fp) {
-  return __sfeof(fp);
-}
-
-int ferror_unlocked(FILE* fp) {
-  return __sferror(fp);
 }

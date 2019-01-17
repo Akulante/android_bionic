@@ -29,10 +29,15 @@
 #ifndef __BIONIC_PRIVATE_BIONIC_TLS_H_
 #define __BIONIC_PRIVATE_BIONIC_TLS_H_
 
+#include <locale.h>
+#include <mntent.h>
+#include <stdio.h>
 #include <sys/cdefs.h>
-#include <sys/limits.h>
+#include <sys/param.h>
+
 #include "bionic_macros.h"
 #include "__get_tls.h"
+#include "grp_pwd.h"
 
 __BEGIN_DECLS
 
@@ -67,8 +72,37 @@ enum {
   TLS_SLOT_STACK_GUARD = 5, // GCC requires this specific slot for x86.
   TLS_SLOT_DLERROR,
 
+  // Fast storage for Thread::Current() in ART.
+  TLS_SLOT_ART_THREAD_SELF,
+
+  // Lets TSAN avoid using pthread_getspecific for finding the current thread
+  // state.
+  TLS_SLOT_TSAN,
+
   BIONIC_TLS_SLOTS // Must come last!
 };
+
+// ~3 pages.
+struct bionic_tls {
+  locale_t locale;
+
+  char basename_buf[MAXPATHLEN];
+  char dirname_buf[MAXPATHLEN];
+
+  mntent mntent_buf;
+  char mntent_strings[BUFSIZ];
+
+  char ptsname_buf[32];
+  char ttyname_buf[64];
+
+  char strerror_buf[NL_TEXTMAX];
+  char strsignal_buf[NL_TEXTMAX];
+
+  group_state_t group;
+  passwd_state_t passwd;
+};
+
+#define BIONIC_TLS_SIZE (BIONIC_ALIGN(sizeof(bionic_tls), PAGE_SIZE))
 
 /*
  * Bionic uses some pthread keys internally. All pthread keys used internally
@@ -79,30 +113,14 @@ enum {
  * pthread_test should fail if we forget.
  *
  * These are the pthread keys currently used internally by libc:
- *
- *  basename               libc (ThreadLocalBuffer)
- *  dirname                libc (ThreadLocalBuffer)
- *  uselocale              libc (can be used in constructors)
- *  getmntent_mntent       libc (ThreadLocalBuffer)
- *  getmntent_strings      libc (ThreadLocalBuffer)
- *  ptsname                libc (ThreadLocalBuffer)
- *  ttyname                libc (ThreadLocalBuffer)
- *  strerror               libc (ThreadLocalBuffer)
- *  strsignal              libc (ThreadLocalBuffer)
- *  passwd                 libc (ThreadLocalBuffer)
- *  group                  libc (ThreadLocalBuffer)
  *  _res_key               libc (constructor in BSD code)
  */
 
-#define LIBC_PTHREAD_KEY_RESERVED_COUNT 12
+#define LIBC_PTHREAD_KEY_RESERVED_COUNT 1
 
-#if defined(USE_JEMALLOC)
 /* Internally, jemalloc uses a single key for per thread data. */
 #define JEMALLOC_PTHREAD_KEY_RESERVED_COUNT 1
 #define BIONIC_PTHREAD_KEY_RESERVED_COUNT (LIBC_PTHREAD_KEY_RESERVED_COUNT + JEMALLOC_PTHREAD_KEY_RESERVED_COUNT)
-#else
-#define BIONIC_PTHREAD_KEY_RESERVED_COUNT LIBC_PTHREAD_KEY_RESERVED_COUNT
-#endif
 
 /*
  * Maximum number of pthread keys allocated.
@@ -114,7 +132,7 @@ __END_DECLS
 
 #if defined(__cplusplus)
 class KernelArgumentBlock;
-extern __LIBC_HIDDEN__ void __libc_init_tls(KernelArgumentBlock& args);
+extern void __libc_init_main_thread(KernelArgumentBlock&);
 #endif
 
 #endif /* __BIONIC_PRIVATE_BIONIC_TLS_H_ */

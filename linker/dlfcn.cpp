@@ -1,43 +1,54 @@
 /*
  * Copyright (C) 2007 The Android Open Source Project
+ * All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #include "linker.h"
+#include "linker_cfi.h"
+#include "linker_globals.h"
+#include "linker_dlwarning.h"
 
-#include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <android/dlext.h>
 #include <android/api-level.h>
 
 #include <bionic/pthread_internal.h>
 #include "private/bionic_tls.h"
 #include "private/ScopedPthreadMutexLocker.h"
-#include "private/ThreadLocalBuffer.h"
-
-/* This file hijacks the symbols stubbed out in libdl.so. */
 
 static pthread_mutex_t g_dl_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
-static const char* __bionic_set_dlerror(char* new_value) {
+static char* __bionic_set_dlerror(char* new_value) {
   char** dlerror_slot = &reinterpret_cast<char**>(__get_tls())[TLS_SLOT_DLERROR];
 
-  const char* old_value = *dlerror_slot;
+  char* old_value = *dlerror_slot;
   *dlerror_slot = new_value;
+  if (new_value != nullptr) LD_LOG(kLogErrors, "dlerror set to \"%s\"", new_value);
   return old_value;
 }
 
@@ -52,24 +63,28 @@ static void __bionic_format_dlerror(const char* msg, const char* detail) {
   __bionic_set_dlerror(buffer);
 }
 
-const char* dlerror() {
-  const char* old_value = __bionic_set_dlerror(nullptr);
+char* __dlerror() {
+  char* old_value = __bionic_set_dlerror(nullptr);
   return old_value;
 }
 
-void android_get_LD_LIBRARY_PATH(char* buffer, size_t buffer_size) {
+void __android_get_LD_LIBRARY_PATH(char* buffer, size_t buffer_size) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
   do_android_get_LD_LIBRARY_PATH(buffer, buffer_size);
 }
 
-void android_update_LD_LIBRARY_PATH(const char* ld_library_path) {
+void __android_update_LD_LIBRARY_PATH(const char* ld_library_path) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
   do_android_update_LD_LIBRARY_PATH(ld_library_path);
 }
 
-static void* dlopen_ext(const char* filename, int flags, const android_dlextinfo* extinfo) {
+static void* dlopen_ext(const char* filename,
+                        int flags,
+                        const android_dlextinfo* extinfo,
+                        const void* caller_addr) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
-  soinfo* result = do_dlopen(filename, flags, extinfo);
+  g_linker_logger.ResetState();
+  void* result = do_dlopen(filename, flags, extinfo, caller_addr);
   if (result == nullptr) {
     __bionic_format_dlerror("dlopen failed", linker_get_error_buffer());
     return nullptr;
@@ -77,100 +92,134 @@ static void* dlopen_ext(const char* filename, int flags, const android_dlextinfo
   return result;
 }
 
-void* android_dlopen_ext(const char* filename, int flags, const android_dlextinfo* extinfo) {
-  return dlopen_ext(filename, flags, extinfo);
+void* __android_dlopen_ext(const char* filename,
+                           int flags,
+                           const android_dlextinfo* extinfo,
+                           const void* caller_addr) {
+  return dlopen_ext(filename, flags, extinfo, caller_addr);
 }
 
-void* dlopen(const char* filename, int flags) {
-  return dlopen_ext(filename, flags, nullptr);
+void* __dlopen(const char* filename, int flags, const void* caller_addr) {
+  return dlopen_ext(filename, flags, nullptr, caller_addr);
 }
 
-void* dlsym(void* handle, const char* symbol) {
+void* dlsym_impl(void* handle, const char* symbol, const char* version, const void* caller_addr) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
-
-#if !defined(__LP64__)
-  if (handle == nullptr) {
-    __bionic_format_dlerror("dlsym library handle is null", nullptr);
-    return nullptr;
-  }
-#endif
-
-  if (symbol == nullptr) {
-    __bionic_format_dlerror("dlsym symbol name is null", nullptr);
+  g_linker_logger.ResetState();
+  void* result;
+  if (!do_dlsym(handle, symbol, version, caller_addr, &result)) {
+    __bionic_format_dlerror(linker_get_error_buffer(), nullptr);
     return nullptr;
   }
 
-  soinfo* found = nullptr;
-  const ElfW(Sym)* sym = nullptr;
-  void* caller_addr = __builtin_return_address(0);
-  soinfo* caller = find_containing_library(caller_addr);
-
-  if (handle == RTLD_DEFAULT || handle == RTLD_NEXT) {
-    sym = dlsym_linear_lookup(symbol, &found, caller, handle);
-  } else {
-    sym = dlsym_handle_lookup(reinterpret_cast<soinfo*>(handle), &found, symbol);
-  }
-
-  if (sym != nullptr) {
-    unsigned bind = ELF_ST_BIND(sym->st_info);
-
-    if ((bind == STB_GLOBAL || bind == STB_WEAK) && sym->st_shndx != 0) {
-      return reinterpret_cast<void*>(found->resolve_symbol_address(sym));
-    }
-
-    __bionic_format_dlerror("symbol found but not global", symbol);
-    return nullptr;
-  } else {
-    __bionic_format_dlerror("undefined symbol", symbol);
-    return nullptr;
-  }
+  return result;
 }
 
-int dladdr(const void* addr, Dl_info* info) {
+void* __dlsym(void* handle, const char* symbol, const void* caller_addr) {
+  return dlsym_impl(handle, symbol, nullptr, caller_addr);
+}
+
+void* __dlvsym(void* handle, const char* symbol, const char* version, const void* caller_addr) {
+  return dlsym_impl(handle, symbol, version, caller_addr);
+}
+
+int __dladdr(const void* addr, Dl_info* info) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
-
-  // Determine if this address can be found in any library currently mapped.
-  soinfo* si = find_containing_library(addr);
-  if (si == nullptr) {
-    return 0;
-  }
-
-  memset(info, 0, sizeof(Dl_info));
-
-  info->dli_fname = si->get_realpath();
-  // Address at which the shared object is loaded.
-  info->dli_fbase = reinterpret_cast<void*>(si->base);
-
-  // Determine if any symbol in the library contains the specified address.
-  ElfW(Sym)* sym = si->find_symbol_by_address(addr);
-  if (sym != nullptr) {
-    info->dli_sname = si->get_string(sym->st_name);
-    info->dli_saddr = reinterpret_cast<void*>(si->resolve_symbol_address(sym));
-  }
-
-  return 1;
+  return do_dladdr(addr, info);
 }
 
-int dlclose(void* handle) {
+int __dlclose(void* handle) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
-  do_dlclose(reinterpret_cast<soinfo*>(handle));
-  // dlclose has no defined errors.
-  return 0;
+  int result = do_dlclose(handle);
+  if (result != 0) {
+    __bionic_format_dlerror("dlclose failed", linker_get_error_buffer());
+  }
+  return result;
 }
 
+// This function is needed by libgcc.a (this is why there is no prefix for this one)
 int dl_iterate_phdr(int (*cb)(dl_phdr_info* info, size_t size, void* data), void* data) {
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
   return do_dl_iterate_phdr(cb, data);
 }
 
-void android_set_application_target_sdk_version(uint32_t target) {
+#if defined(__arm__)
+_Unwind_Ptr __dl_unwind_find_exidx(_Unwind_Ptr pc, int* pcount) {
+  ScopedPthreadMutexLocker locker(&g_dl_mutex);
+  return do_dl_unwind_find_exidx(pc, pcount);
+}
+#endif
+
+void __android_set_application_target_sdk_version(uint32_t target) {
   // lock to avoid modification in the middle of dlopen.
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
   set_application_target_sdk_version(target);
 }
 
-uint32_t android_get_application_target_sdk_version() {
+uint32_t __android_get_application_target_sdk_version() {
   return get_application_target_sdk_version();
+}
+
+void __android_dlwarning(void* obj, void (*f)(void*, const char*)) {
+  ScopedPthreadMutexLocker locker(&g_dl_mutex);
+  get_dlwarning(obj, f);
+}
+
+bool __android_init_anonymous_namespace(const char* shared_libs_sonames,
+                                         const char* library_search_path) {
+  ScopedPthreadMutexLocker locker(&g_dl_mutex);
+  bool success = init_anonymous_namespace(shared_libs_sonames, library_search_path);
+  if (!success) {
+    __bionic_format_dlerror("android_init_anonymous_namespace failed", linker_get_error_buffer());
+  }
+
+  return success;
+}
+
+android_namespace_t* __android_create_namespace(const char* name,
+                                                const char* ld_library_path,
+                                                const char* default_library_path,
+                                                uint64_t type,
+                                                const char* permitted_when_isolated_path,
+                                                android_namespace_t* parent_namespace,
+                                                const void* caller_addr) {
+  ScopedPthreadMutexLocker locker(&g_dl_mutex);
+
+  android_namespace_t* result = create_namespace(caller_addr,
+                                                 name,
+                                                 ld_library_path,
+                                                 default_library_path,
+                                                 type,
+                                                 permitted_when_isolated_path,
+                                                 parent_namespace);
+
+  if (result == nullptr) {
+    __bionic_format_dlerror("android_create_namespace failed", linker_get_error_buffer());
+  }
+
+  return result;
+}
+
+bool __android_link_namespaces(android_namespace_t* namespace_from,
+                               android_namespace_t* namespace_to,
+                               const char* shared_libs_sonames) {
+  ScopedPthreadMutexLocker locker(&g_dl_mutex);
+
+  bool success = link_namespaces(namespace_from, namespace_to, shared_libs_sonames);
+
+  if (!success) {
+    __bionic_format_dlerror("android_link_namespaces failed", linker_get_error_buffer());
+  }
+
+  return success;
+}
+
+android_namespace_t* __android_get_exported_namespace(const char* name) {
+  return get_exported_namespace(name);
+}
+
+void __cfi_fail(uint64_t CallSiteTypeId, void* Ptr, void *DiagData, void *CallerPc) {
+  CFIShadowWriter::CfiFail(CallSiteTypeId, Ptr, DiagData, CallerPc);
 }
 
 // name_offset: starting index of the name in libdl_info.strtab
@@ -178,14 +227,14 @@ uint32_t android_get_application_target_sdk_version() {
     { name_offset, \
       reinterpret_cast<Elf32_Addr>(value), \
       /* st_size */ 0, \
-      (shndx == 0) ? 0 : (STB_GLOBAL << 4), \
+      ((shndx) == 0) ? 0 : (STB_GLOBAL << 4), \
       /* st_other */ 0, \
       shndx, \
     }
 
 #define ELF64_SYM_INITIALIZER(name_offset, value, shndx) \
     { name_offset, \
-      (shndx == 0) ? 0 : (STB_GLOBAL << 4), \
+      ((shndx) == 0) ? 0 : (STB_GLOBAL << 4), \
       /* st_other */ 0, \
       shndx, \
       reinterpret_cast<Elf64_Addr>(value), \
@@ -193,18 +242,32 @@ uint32_t android_get_application_target_sdk_version() {
     }
 
 static const char ANDROID_LIBDL_STRTAB[] =
-  // 0000000 00011111 111112 22222222 2333333 3333444444444455555555556666666 6667777777777888888888899999 99999
-  // 0123456 78901234 567890 12345678 9012345 6789012345678901234567890123456 7890123456789012345678901234 56789
-    "dlopen\0dlclose\0dlsym\0dlerror\0dladdr\0android_update_LD_LIBRARY_PATH\0android_get_LD_LIBRARY_PATH\0dl_it"
-  // 00000000001 1111111112222222222 3333333333444444444455555555556666666666777 777777788888888889999999999
-  // 01234567890 1234567890123456789 0123456789012345678901234567890123456789012 345678901234567890123456789
-    "erate_phdr\0android_dlopen_ext\0android_set_application_target_sdk_version\0android_get_application_tar"
-  // 0000000000111111
-  // 0123456789012345
-    "get_sdk_version\0"
+  // 0000000000111111 11112222222222333 333333344444444 44555555555566666 6666677777777778 8888888889999999999
+  // 0123456789012345 67890123456789012 345678901234567 89012345678901234 5678901234567890 1234567890123456789
+    "__loader_dlopen\0__loader_dlclose\0__loader_dlsym\0__loader_dlerror\0__loader_dladdr\0__loader_android_up"
+  // 1*
+  // 000000000011111111112 2222222223333333333444444444455555555 5566666666667777777777888 88888889999999999
+  // 012345678901234567890 1234567890123456789012345678901234567 8901234567890123456789012 34567890123456789
+    "date_LD_LIBRARY_PATH\0__loader_android_get_LD_LIBRARY_PATH\0__loader_dl_iterate_phdr\0__loader_android_"
+  // 2*
+  // 00000000001 1111111112222222222333333333344444444445555555555666 6666666777777777788888888889999999999
+  // 01234567890 1234567890123456789012345678901234567890123456789012 3456789012345678901234567890123456789
+    "dlopen_ext\0__loader_android_set_application_target_sdk_version\0__loader_android_get_application_targ"
+  // 3*
+  // 000000000011111 111112222222222333333333344444444445555555 5556666666666777777777788888888889 999999999
+  // 012345678901234 567890123456789012345678901234567890123456 7890123456789012345678901234567890 123456789
+    "et_sdk_version\0__loader_android_init_anonymous_namespace\0__loader_android_create_namespace\0__loader_"
+  // 4*
+  // 0000000 000111111111122222222223333 333333444444444455 555555556666666666777777777788888 888889999999999
+  // 0123456 789012345678901234567890123 456789012345678901 234567890123456789012345678901234 567890123456789
+    "dlvsym\0__loader_android_dlwarning\0__loader_cfi_fail\0__loader_android_link_namespaces\0__loader_androi"
+  // 5*
+  // 0000000000111111111122222 22222
+  // 0123456789012345678901234 56789
+    "d_get_exported_namespace\0"
 #if defined(__arm__)
-  // 216
-    "dl_unwind_find_exidx\0"
+  // 525
+    "__loader_dl_unwind_find_exidx\0"
 #endif
     ;
 
@@ -214,19 +277,26 @@ static ElfW(Sym) g_libdl_symtab[] = {
   // supposed to have st_name == 0, but instead, it points to an index
   // in the strtab with a \0 to make iterating through the symtab easier.
   ELFW(SYM_INITIALIZER)(sizeof(ANDROID_LIBDL_STRTAB) - 1, nullptr, 0),
-  ELFW(SYM_INITIALIZER)(  0, &dlopen, 1),
-  ELFW(SYM_INITIALIZER)(  7, &dlclose, 1),
-  ELFW(SYM_INITIALIZER)( 15, &dlsym, 1),
-  ELFW(SYM_INITIALIZER)( 21, &dlerror, 1),
-  ELFW(SYM_INITIALIZER)( 29, &dladdr, 1),
-  ELFW(SYM_INITIALIZER)( 36, &android_update_LD_LIBRARY_PATH, 1),
-  ELFW(SYM_INITIALIZER)( 67, &android_get_LD_LIBRARY_PATH, 1),
-  ELFW(SYM_INITIALIZER)( 95, &dl_iterate_phdr, 1),
-  ELFW(SYM_INITIALIZER)(111, &android_dlopen_ext, 1),
-  ELFW(SYM_INITIALIZER)(130, &android_set_application_target_sdk_version, 1),
-  ELFW(SYM_INITIALIZER)(173, &android_get_application_target_sdk_version, 1),
+  ELFW(SYM_INITIALIZER)(  0, &__dlopen, 1),
+  ELFW(SYM_INITIALIZER)( 16, &__dlclose, 1),
+  ELFW(SYM_INITIALIZER)( 33, &__dlsym, 1),
+  ELFW(SYM_INITIALIZER)( 48, &__dlerror, 1),
+  ELFW(SYM_INITIALIZER)( 65, &__dladdr, 1),
+  ELFW(SYM_INITIALIZER)( 81, &__android_update_LD_LIBRARY_PATH, 1),
+  ELFW(SYM_INITIALIZER)(121, &__android_get_LD_LIBRARY_PATH, 1),
+  ELFW(SYM_INITIALIZER)(158, &dl_iterate_phdr, 1),
+  ELFW(SYM_INITIALIZER)(183, &__android_dlopen_ext, 1),
+  ELFW(SYM_INITIALIZER)(211, &__android_set_application_target_sdk_version, 1),
+  ELFW(SYM_INITIALIZER)(263, &__android_get_application_target_sdk_version, 1),
+  ELFW(SYM_INITIALIZER)(315, &__android_init_anonymous_namespace, 1),
+  ELFW(SYM_INITIALIZER)(357, &__android_create_namespace, 1),
+  ELFW(SYM_INITIALIZER)(391, &__dlvsym, 1),
+  ELFW(SYM_INITIALIZER)(407, &__android_dlwarning, 1),
+  ELFW(SYM_INITIALIZER)(434, &__cfi_fail, 1),
+  ELFW(SYM_INITIALIZER)(452, &__android_link_namespaces, 1),
+  ELFW(SYM_INITIALIZER)(485, &__android_get_exported_namespace, 1),
 #if defined(__arm__)
-  ELFW(SYM_INITIALIZER)(216, &dl_unwind_find_exidx, 1),
+  ELFW(SYM_INITIALIZER)(525, &__dl_unwind_find_exidx, 1),
 #endif
 };
 
@@ -243,18 +313,18 @@ static ElfW(Sym) g_libdl_symtab[] = {
 // Note that adding any new symbols here requires stubbing them out in libdl.
 static unsigned g_libdl_buckets[1] = { 1 };
 #if defined(__arm__)
-static unsigned g_libdl_chains[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0 };
+static unsigned g_libdl_chains[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 0 };
 #else
-static unsigned g_libdl_chains[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0 };
+static unsigned g_libdl_chains[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 0 };
 #endif
 
 static uint8_t __libdl_info_buf[sizeof(soinfo)] __attribute__((aligned(8)));
 static soinfo* __libdl_info = nullptr;
 
 // This is used by the dynamic linker. Every process gets these symbols for free.
-soinfo* get_libdl_info() {
+soinfo* get_libdl_info(const char* linker_path, const link_map& linker_map) {
   if (__libdl_info == nullptr) {
-    __libdl_info = new (__libdl_info_buf) soinfo("libdl.so", nullptr, 0, RTLD_GLOBAL);
+    __libdl_info = new (__libdl_info_buf) soinfo(&g_default_namespace, linker_path, nullptr, 0, 0);
     __libdl_info->flags_ |= FLAG_LINKED;
     __libdl_info->strtab_ = ANDROID_LIBDL_STRTAB;
     __libdl_info->symtab_ = g_libdl_symtab;
@@ -265,9 +335,13 @@ soinfo* get_libdl_info() {
     __libdl_info->ref_count_ = 1;
     __libdl_info->strtab_size_ = sizeof(ANDROID_LIBDL_STRTAB);
     __libdl_info->local_group_root_ = __libdl_info;
-    __libdl_info->soname_ = "libdl.so";
+    __libdl_info->soname_ = "ld-android.so";
     __libdl_info->target_sdk_version_ = __ANDROID_API__;
-#if defined(__arm__)
+    __libdl_info->generate_handle();
+    __libdl_info->link_map_head.l_addr = linker_map.l_addr;
+    __libdl_info->link_map_head.l_name = linker_map.l_name;
+    __libdl_info->link_map_head.l_ld = linker_map.l_ld;
+#if defined(__work_around_b_24465209__)
     strlcpy(__libdl_info->old_name_, __libdl_info->soname_, sizeof(__libdl_info->old_name_));
 #endif
   }

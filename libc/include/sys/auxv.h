@@ -25,15 +25,17 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+
 #ifndef _SYS_AUXV_H_
 #define _SYS_AUXV_H_
 
-#include <linux/auxvec.h>
 #include <sys/cdefs.h>
+
+#include <bits/auxvec.h>
 
 __BEGIN_DECLS
 
-unsigned long int getauxval(unsigned long int type);
+unsigned long int getauxval(unsigned long int type) __INTRODUCED_IN(18);
 
 __END_DECLS
 

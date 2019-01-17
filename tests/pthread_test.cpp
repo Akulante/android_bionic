@@ -24,24 +24,22 @@
 #include <signal.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 #include <unwind.h>
 
 #include <atomic>
-#include <regex>
 #include <vector>
 
-#include <base/file.h>
-#include <base/stringprintf.h>
+#include <android-base/scopeguard.h>
 
+#include "private/bionic_constants.h"
 #include "private/bionic_macros.h"
-#include "private/ScopeGuard.h"
 #include "BionicDeathTest.h"
 #include "ScopedSignalHandler.h"
-
-extern "C" pid_t gettid();
+#include "utils.h"
 
 TEST(pthread, pthread_key_create) {
   pthread_key_t key;
@@ -67,8 +65,8 @@ TEST(pthread, pthread_key_many_distinct) {
   int nkeys = PTHREAD_KEYS_MAX / 2;
   std::vector<pthread_key_t> keys;
 
-  auto scope_guard = make_scope_guard([&keys]{
-    for (auto key : keys) {
+  auto scope_guard = android::base::make_scope_guard([&keys] {
+    for (const auto& key : keys) {
       EXPECT_EQ(0, pthread_key_delete(key));
     }
   });
@@ -106,7 +104,7 @@ TEST(pthread, pthread_key_not_exceed_PTHREAD_KEYS_MAX) {
   }
 
   // Don't leak keys.
-  for (auto key : keys) {
+  for (const auto& key : keys) {
     EXPECT_EQ(0, pthread_key_delete(key));
   }
   keys.clear();
@@ -145,10 +143,7 @@ TEST(pthread, pthread_key_fork) {
     _exit(99);
   }
 
-  int status;
-  ASSERT_EQ(pid, waitpid(pid, &status, 0));
-  ASSERT_TRUE(WIFEXITED(status));
-  ASSERT_EQ(99, WEXITSTATUS(status));
+  AssertChildExited(pid, 99);
 
   ASSERT_EQ(expected, pthread_getspecific(key));
   ASSERT_EQ(0, pthread_key_delete(key));
@@ -162,7 +157,7 @@ TEST(pthread, pthread_key_dirty) {
   pthread_key_t key;
   ASSERT_EQ(0, pthread_key_create(&key, NULL));
 
-  size_t stack_size = 128 * 1024;
+  size_t stack_size = 640 * 1024;
   void* stack = mmap(NULL, stack_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
   ASSERT_NE(MAP_FAILED, stack);
   memset(stack, 0xff, stack_size);
@@ -220,13 +215,13 @@ class SpinFunctionHelper {
     while (spin_flag_) {}
     return NULL;
   }
-  static volatile bool spin_flag_;
+  static std::atomic<bool> spin_flag_;
 };
 
 // It doesn't matter if spin_flag_ is used in several tests,
 // because it is always set to false after each test. Each thread
 // loops on spin_flag_ can find it becomes false at some time.
-volatile bool SpinFunctionHelper::spin_flag_ = false;
+std::atomic<bool> SpinFunctionHelper::spin_flag_;
 
 static void* JoinFn(void* arg) {
   return reinterpret_cast<void*>(pthread_join(reinterpret_cast<pthread_t>(arg), NULL));
@@ -267,10 +262,10 @@ TEST(pthread, pthread_create_EAGAIN) {
 }
 
 TEST(pthread, pthread_no_join_after_detach) {
-  SpinFunctionHelper spinhelper;
+  SpinFunctionHelper spin_helper;
 
   pthread_t t1;
-  ASSERT_EQ(0, pthread_create(&t1, NULL, spinhelper.GetFunction(), NULL));
+  ASSERT_EQ(0, pthread_create(&t1, NULL, spin_helper.GetFunction(), NULL));
 
   // After a pthread_detach...
   ASSERT_EQ(0, pthread_detach(t1));
@@ -281,10 +276,10 @@ TEST(pthread, pthread_no_join_after_detach) {
 }
 
 TEST(pthread, pthread_no_op_detach_after_join) {
-  SpinFunctionHelper spinhelper;
+  SpinFunctionHelper spin_helper;
 
   pthread_t t1;
-  ASSERT_EQ(0, pthread_create(&t1, NULL, spinhelper.GetFunction(), NULL));
+  ASSERT_EQ(0, pthread_create(&t1, NULL, spin_helper.GetFunction(), NULL));
 
   // If thread 2 is already waiting to join thread 1...
   pthread_t t2;
@@ -299,7 +294,7 @@ TEST(pthread, pthread_no_op_detach_after_join) {
 #endif
   AssertDetached(t1, false);
 
-  spinhelper.UnSpin();
+  spin_helper.UnSpin();
 
   // ...but t2's join on t1 still goes ahead (which we can tell because our join on t2 finishes).
   void* join_result;
@@ -403,30 +398,77 @@ TEST(pthread, pthread_sigmask) {
   ASSERT_EQ(0, pthread_sigmask(SIG_SETMASK, &original_set, NULL));
 }
 
-TEST(pthread, pthread_setname_np__too_long) {
+static void test_pthread_setname_np__pthread_getname_np(pthread_t t) {
+  ASSERT_EQ(0, pthread_setname_np(t, "short"));
+  char name[32];
+  ASSERT_EQ(0, pthread_getname_np(t, name, sizeof(name)));
+  ASSERT_STREQ("short", name);
+
   // The limit is 15 characters --- the kernel's buffer is 16, but includes a NUL.
-  ASSERT_EQ(0, pthread_setname_np(pthread_self(), "123456789012345"));
-  ASSERT_EQ(ERANGE, pthread_setname_np(pthread_self(), "1234567890123456"));
+  ASSERT_EQ(0, pthread_setname_np(t, "123456789012345"));
+  ASSERT_EQ(0, pthread_getname_np(t, name, sizeof(name)));
+  ASSERT_STREQ("123456789012345", name);
+
+  ASSERT_EQ(ERANGE, pthread_setname_np(t, "1234567890123456"));
+
+  // The passed-in buffer should be at least 16 bytes.
+  ASSERT_EQ(0, pthread_getname_np(t, name, 16));
+  ASSERT_EQ(ERANGE, pthread_getname_np(t, name, 15));
 }
 
-TEST(pthread, pthread_setname_np__self) {
-  ASSERT_EQ(0, pthread_setname_np(pthread_self(), "short 1"));
+TEST(pthread, pthread_setname_np__pthread_getname_np__self) {
+  test_pthread_setname_np__pthread_getname_np(pthread_self());
 }
 
-TEST(pthread, pthread_setname_np__other) {
-  SpinFunctionHelper spinhelper;
+TEST(pthread, pthread_setname_np__pthread_getname_np__other) {
+  SpinFunctionHelper spin_helper;
 
-  pthread_t t1;
-  ASSERT_EQ(0, pthread_create(&t1, NULL, spinhelper.GetFunction(), NULL));
-  ASSERT_EQ(0, pthread_setname_np(t1, "short 2"));
+  pthread_t t;
+  ASSERT_EQ(0, pthread_create(&t, nullptr, spin_helper.GetFunction(), nullptr));
+  test_pthread_setname_np__pthread_getname_np(t);
+  spin_helper.UnSpin();
+  ASSERT_EQ(0, pthread_join(t, nullptr));
 }
 
-TEST(pthread, pthread_setname_np__no_such_thread) {
+// http://b/28051133: a kernel misfeature means that you can't change the
+// name of another thread if you've set PR_SET_DUMPABLE to 0.
+TEST(pthread, pthread_setname_np__pthread_getname_np__other_PR_SET_DUMPABLE) {
+  ASSERT_EQ(0, prctl(PR_SET_DUMPABLE, 0)) << strerror(errno);
+
+  SpinFunctionHelper spin_helper;
+
+  pthread_t t;
+  ASSERT_EQ(0, pthread_create(&t, nullptr, spin_helper.GetFunction(), nullptr));
+  test_pthread_setname_np__pthread_getname_np(t);
+  spin_helper.UnSpin();
+  ASSERT_EQ(0, pthread_join(t, nullptr));
+}
+
+TEST_F(pthread_DeathTest, pthread_setname_np__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
-  // Call pthread_setname_np after thread has already exited.
-  ASSERT_EQ(ENOENT, pthread_setname_np(dead_thread, "short 3"));
+  EXPECT_DEATH(pthread_setname_np(dead_thread, "short 3"), "invalid pthread_t");
+}
+
+TEST_F(pthread_DeathTest, pthread_setname_np__null_thread) {
+  pthread_t null_thread = 0;
+  EXPECT_EQ(ENOENT, pthread_setname_np(null_thread, "short 3"));
+}
+
+TEST_F(pthread_DeathTest, pthread_getname_np__no_such_thread) {
+  pthread_t dead_thread;
+  MakeDeadThread(dead_thread);
+
+  char name[64];
+  EXPECT_DEATH(pthread_getname_np(dead_thread, name, sizeof(name)), "invalid pthread_t");
+}
+
+TEST_F(pthread_DeathTest, pthread_getname_np__null_thread) {
+  pthread_t null_thread = 0;
+
+  char name[64];
+  EXPECT_EQ(ENOENT, pthread_getname_np(null_thread, name, sizeof(name)));
 }
 
 TEST(pthread, pthread_kill__0) {
@@ -452,70 +494,107 @@ TEST(pthread, pthread_kill__in_signal_handler) {
   ASSERT_EQ(0, pthread_kill(pthread_self(), SIGALRM));
 }
 
-TEST(pthread, pthread_detach__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_detach__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
-  ASSERT_EQ(ESRCH, pthread_detach(dead_thread));
+  EXPECT_DEATH(pthread_detach(dead_thread), "invalid pthread_t");
+}
+
+TEST_F(pthread_DeathTest, pthread_detach__null_thread) {
+  pthread_t null_thread = 0;
+  EXPECT_EQ(ESRCH, pthread_detach(null_thread));
 }
 
 TEST(pthread, pthread_getcpuclockid__clock_gettime) {
-  SpinFunctionHelper spinhelper;
+  SpinFunctionHelper spin_helper;
 
   pthread_t t;
-  ASSERT_EQ(0, pthread_create(&t, NULL, spinhelper.GetFunction(), NULL));
+  ASSERT_EQ(0, pthread_create(&t, NULL, spin_helper.GetFunction(), NULL));
 
   clockid_t c;
   ASSERT_EQ(0, pthread_getcpuclockid(t, &c));
   timespec ts;
   ASSERT_EQ(0, clock_gettime(c, &ts));
+  spin_helper.UnSpin();
+  ASSERT_EQ(0, pthread_join(t, nullptr));
 }
 
-TEST(pthread, pthread_getcpuclockid__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_getcpuclockid__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
   clockid_t c;
-  ASSERT_EQ(ESRCH, pthread_getcpuclockid(dead_thread, &c));
+  EXPECT_DEATH(pthread_getcpuclockid(dead_thread, &c), "invalid pthread_t");
 }
 
-TEST(pthread, pthread_getschedparam__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_getcpuclockid__null_thread) {
+  pthread_t null_thread = 0;
+  clockid_t c;
+  EXPECT_EQ(ESRCH, pthread_getcpuclockid(null_thread, &c));
+}
+
+TEST_F(pthread_DeathTest, pthread_getschedparam__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
   int policy;
   sched_param param;
-  ASSERT_EQ(ESRCH, pthread_getschedparam(dead_thread, &policy, &param));
+  EXPECT_DEATH(pthread_getschedparam(dead_thread, &policy, &param), "invalid pthread_t");
 }
 
-TEST(pthread, pthread_setschedparam__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_getschedparam__null_thread) {
+  pthread_t null_thread = 0;
+  int policy;
+  sched_param param;
+  EXPECT_EQ(ESRCH, pthread_getschedparam(null_thread, &policy, &param));
+}
+
+TEST_F(pthread_DeathTest, pthread_setschedparam__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
   int policy = 0;
   sched_param param;
-  ASSERT_EQ(ESRCH, pthread_setschedparam(dead_thread, policy, &param));
+  EXPECT_DEATH(pthread_setschedparam(dead_thread, policy, &param), "invalid pthread_t");
 }
 
-TEST(pthread, pthread_join__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_setschedparam__null_thread) {
+  pthread_t null_thread = 0;
+  int policy = 0;
+  sched_param param;
+  EXPECT_EQ(ESRCH, pthread_setschedparam(null_thread, policy, &param));
+}
+
+TEST_F(pthread_DeathTest, pthread_join__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
-  ASSERT_EQ(ESRCH, pthread_join(dead_thread, NULL));
+  EXPECT_DEATH(pthread_join(dead_thread, NULL), "invalid pthread_t");
 }
 
-TEST(pthread, pthread_kill__no_such_thread) {
+TEST_F(pthread_DeathTest, pthread_join__null_thread) {
+  pthread_t null_thread = 0;
+  EXPECT_EQ(ESRCH, pthread_join(null_thread, NULL));
+}
+
+TEST_F(pthread_DeathTest, pthread_kill__no_such_thread) {
   pthread_t dead_thread;
   MakeDeadThread(dead_thread);
 
-  ASSERT_EQ(ESRCH, pthread_kill(dead_thread, 0));
+  EXPECT_DEATH(pthread_kill(dead_thread, 0), "invalid pthread_t");
+}
+
+TEST_F(pthread_DeathTest, pthread_kill__null_thread) {
+  pthread_t null_thread = 0;
+  EXPECT_EQ(ESRCH, pthread_kill(null_thread, 0));
 }
 
 TEST(pthread, pthread_join__multijoin) {
-  SpinFunctionHelper spinhelper;
+  SpinFunctionHelper spin_helper;
 
   pthread_t t1;
-  ASSERT_EQ(0, pthread_create(&t1, NULL, spinhelper.GetFunction(), NULL));
+  ASSERT_EQ(0, pthread_create(&t1, NULL, spin_helper.GetFunction(), NULL));
 
   pthread_t t2;
   ASSERT_EQ(0, pthread_create(&t2, NULL, JoinFn, reinterpret_cast<void*>(t1)));
@@ -525,7 +604,7 @@ TEST(pthread, pthread_join__multijoin) {
   // Multiple joins to the same thread should fail.
   ASSERT_EQ(EINVAL, pthread_join(t1, NULL));
 
-  spinhelper.UnSpin();
+  spin_helper.UnSpin();
 
   // ...but t2's join on t1 still goes ahead (which we can tell because our join on t2 finishes).
   void* join_result;
@@ -537,7 +616,7 @@ TEST(pthread, pthread_join__race) {
   // http://b/11693195 --- pthread_join could return before the thread had actually exited.
   // If the joiner unmapped the thread's stack, that could lead to SIGSEGV in the thread.
   for (size_t i = 0; i < 1024; ++i) {
-    size_t stack_size = 64*1024;
+    size_t stack_size = 640*1024;
     void* stack = mmap(NULL, stack_size, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
 
     pthread_attr_t a;
@@ -719,58 +798,47 @@ TEST(pthread, pthread_rwlock_smoke) {
   ASSERT_EQ(0, pthread_rwlock_destroy(&l));
 }
 
-static void WaitUntilThreadSleep(std::atomic<pid_t>& pid) {
-  while (pid == 0) {
-    usleep(1000);
-  }
-  std::string filename = android::base::StringPrintf("/proc/%d/stat", pid.load());
-  std::regex regex {R"(\s+S\s+)"};
-
-  while (true) {
-    std::string content;
-    ASSERT_TRUE(android::base::ReadFileToString(filename, &content));
-    if (std::regex_search(content, regex)) {
-      break;
-    }
-    usleep(1000);
-  }
-}
-
 struct RwlockWakeupHelperArg {
   pthread_rwlock_t lock;
   enum Progress {
     LOCK_INITIALIZED,
     LOCK_WAITING,
     LOCK_RELEASED,
-    LOCK_ACCESSED
+    LOCK_ACCESSED,
+    LOCK_TIMEDOUT,
   };
   std::atomic<Progress> progress;
   std::atomic<pid_t> tid;
+  std::function<int (pthread_rwlock_t*)> trylock_function;
+  std::function<int (pthread_rwlock_t*)> lock_function;
+  std::function<int (pthread_rwlock_t*, const timespec*)> timed_lock_function;
 };
 
-static void pthread_rwlock_reader_wakeup_writer_helper(RwlockWakeupHelperArg* arg) {
+static void pthread_rwlock_wakeup_helper(RwlockWakeupHelperArg* arg) {
   arg->tid = gettid();
   ASSERT_EQ(RwlockWakeupHelperArg::LOCK_INITIALIZED, arg->progress);
   arg->progress = RwlockWakeupHelperArg::LOCK_WAITING;
 
-  ASSERT_EQ(EBUSY, pthread_rwlock_trywrlock(&arg->lock));
-  ASSERT_EQ(0, pthread_rwlock_wrlock(&arg->lock));
+  ASSERT_EQ(EBUSY, arg->trylock_function(&arg->lock));
+  ASSERT_EQ(0, arg->lock_function(&arg->lock));
   ASSERT_EQ(RwlockWakeupHelperArg::LOCK_RELEASED, arg->progress);
   ASSERT_EQ(0, pthread_rwlock_unlock(&arg->lock));
 
   arg->progress = RwlockWakeupHelperArg::LOCK_ACCESSED;
 }
 
-TEST(pthread, pthread_rwlock_reader_wakeup_writer) {
+static void test_pthread_rwlock_reader_wakeup_writer(std::function<int (pthread_rwlock_t*)> lock_function) {
   RwlockWakeupHelperArg wakeup_arg;
   ASSERT_EQ(0, pthread_rwlock_init(&wakeup_arg.lock, NULL));
   ASSERT_EQ(0, pthread_rwlock_rdlock(&wakeup_arg.lock));
   wakeup_arg.progress = RwlockWakeupHelperArg::LOCK_INITIALIZED;
   wakeup_arg.tid = 0;
+  wakeup_arg.trylock_function = pthread_rwlock_trywrlock;
+  wakeup_arg.lock_function = lock_function;
 
   pthread_t thread;
   ASSERT_EQ(0, pthread_create(&thread, NULL,
-    reinterpret_cast<void* (*)(void*)>(pthread_rwlock_reader_wakeup_writer_helper), &wakeup_arg));
+    reinterpret_cast<void* (*)(void*)>(pthread_rwlock_wakeup_helper), &wakeup_arg));
   WaitUntilThreadSleep(wakeup_arg.tid);
   ASSERT_EQ(RwlockWakeupHelperArg::LOCK_WAITING, wakeup_arg.progress);
 
@@ -782,29 +850,31 @@ TEST(pthread, pthread_rwlock_reader_wakeup_writer) {
   ASSERT_EQ(0, pthread_rwlock_destroy(&wakeup_arg.lock));
 }
 
-static void pthread_rwlock_writer_wakeup_reader_helper(RwlockWakeupHelperArg* arg) {
-  arg->tid = gettid();
-  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_INITIALIZED, arg->progress);
-  arg->progress = RwlockWakeupHelperArg::LOCK_WAITING;
-
-  ASSERT_EQ(EBUSY, pthread_rwlock_tryrdlock(&arg->lock));
-  ASSERT_EQ(0, pthread_rwlock_rdlock(&arg->lock));
-  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_RELEASED, arg->progress);
-  ASSERT_EQ(0, pthread_rwlock_unlock(&arg->lock));
-
-  arg->progress = RwlockWakeupHelperArg::LOCK_ACCESSED;
+TEST(pthread, pthread_rwlock_reader_wakeup_writer) {
+  test_pthread_rwlock_reader_wakeup_writer(pthread_rwlock_wrlock);
 }
 
-TEST(pthread, pthread_rwlock_writer_wakeup_reader) {
+TEST(pthread, pthread_rwlock_reader_wakeup_writer_timedwait) {
+  timespec ts;
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ts.tv_sec += 1;
+  test_pthread_rwlock_reader_wakeup_writer([&](pthread_rwlock_t* lock) {
+    return pthread_rwlock_timedwrlock(lock, &ts);
+  });
+}
+
+static void test_pthread_rwlock_writer_wakeup_reader(std::function<int (pthread_rwlock_t*)> lock_function) {
   RwlockWakeupHelperArg wakeup_arg;
   ASSERT_EQ(0, pthread_rwlock_init(&wakeup_arg.lock, NULL));
   ASSERT_EQ(0, pthread_rwlock_wrlock(&wakeup_arg.lock));
   wakeup_arg.progress = RwlockWakeupHelperArg::LOCK_INITIALIZED;
   wakeup_arg.tid = 0;
+  wakeup_arg.trylock_function = pthread_rwlock_tryrdlock;
+  wakeup_arg.lock_function = lock_function;
 
   pthread_t thread;
   ASSERT_EQ(0, pthread_create(&thread, NULL,
-    reinterpret_cast<void* (*)(void*)>(pthread_rwlock_writer_wakeup_reader_helper), &wakeup_arg));
+    reinterpret_cast<void* (*)(void*)>(pthread_rwlock_wakeup_helper), &wakeup_arg));
   WaitUntilThreadSleep(wakeup_arg.tid);
   ASSERT_EQ(RwlockWakeupHelperArg::LOCK_WAITING, wakeup_arg.progress);
 
@@ -813,6 +883,85 @@ TEST(pthread, pthread_rwlock_writer_wakeup_reader) {
 
   ASSERT_EQ(0, pthread_join(thread, NULL));
   ASSERT_EQ(RwlockWakeupHelperArg::LOCK_ACCESSED, wakeup_arg.progress);
+  ASSERT_EQ(0, pthread_rwlock_destroy(&wakeup_arg.lock));
+}
+
+TEST(pthread, pthread_rwlock_writer_wakeup_reader) {
+  test_pthread_rwlock_writer_wakeup_reader(pthread_rwlock_rdlock);
+}
+
+TEST(pthread, pthread_rwlock_writer_wakeup_reader_timedwait) {
+  timespec ts;
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ts.tv_sec += 1;
+  test_pthread_rwlock_writer_wakeup_reader([&](pthread_rwlock_t* lock) {
+    return pthread_rwlock_timedrdlock(lock, &ts);
+  });
+}
+
+static void pthread_rwlock_wakeup_timeout_helper(RwlockWakeupHelperArg* arg) {
+  arg->tid = gettid();
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_INITIALIZED, arg->progress);
+  arg->progress = RwlockWakeupHelperArg::LOCK_WAITING;
+
+  ASSERT_EQ(EBUSY, arg->trylock_function(&arg->lock));
+
+  timespec ts;
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ASSERT_EQ(ETIMEDOUT, arg->timed_lock_function(&arg->lock, &ts));
+  ts.tv_nsec = -1;
+  ASSERT_EQ(EINVAL, arg->timed_lock_function(&arg->lock, &ts));
+  ts.tv_nsec = NS_PER_S;
+  ASSERT_EQ(EINVAL, arg->timed_lock_function(&arg->lock, &ts));
+  ts.tv_nsec = NS_PER_S - 1;
+  ts.tv_sec = -1;
+  ASSERT_EQ(ETIMEDOUT, arg->timed_lock_function(&arg->lock, &ts));
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ts.tv_sec += 1;
+  ASSERT_EQ(ETIMEDOUT, arg->timed_lock_function(&arg->lock, &ts));
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_WAITING, arg->progress);
+  arg->progress = RwlockWakeupHelperArg::LOCK_TIMEDOUT;
+}
+
+TEST(pthread, pthread_rwlock_timedrdlock_timeout) {
+  RwlockWakeupHelperArg wakeup_arg;
+  ASSERT_EQ(0, pthread_rwlock_init(&wakeup_arg.lock, nullptr));
+  ASSERT_EQ(0, pthread_rwlock_wrlock(&wakeup_arg.lock));
+  wakeup_arg.progress = RwlockWakeupHelperArg::LOCK_INITIALIZED;
+  wakeup_arg.tid = 0;
+  wakeup_arg.trylock_function = pthread_rwlock_tryrdlock;
+  wakeup_arg.timed_lock_function = pthread_rwlock_timedrdlock;
+
+  pthread_t thread;
+  ASSERT_EQ(0, pthread_create(&thread, nullptr,
+      reinterpret_cast<void* (*)(void*)>(pthread_rwlock_wakeup_timeout_helper), &wakeup_arg));
+  WaitUntilThreadSleep(wakeup_arg.tid);
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_WAITING, wakeup_arg.progress);
+
+  ASSERT_EQ(0, pthread_join(thread, nullptr));
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_TIMEDOUT, wakeup_arg.progress);
+  ASSERT_EQ(0, pthread_rwlock_unlock(&wakeup_arg.lock));
+  ASSERT_EQ(0, pthread_rwlock_destroy(&wakeup_arg.lock));
+}
+
+TEST(pthread, pthread_rwlock_timedwrlock_timeout) {
+  RwlockWakeupHelperArg wakeup_arg;
+  ASSERT_EQ(0, pthread_rwlock_init(&wakeup_arg.lock, nullptr));
+  ASSERT_EQ(0, pthread_rwlock_rdlock(&wakeup_arg.lock));
+  wakeup_arg.progress = RwlockWakeupHelperArg::LOCK_INITIALIZED;
+  wakeup_arg.tid = 0;
+  wakeup_arg.trylock_function = pthread_rwlock_trywrlock;
+  wakeup_arg.timed_lock_function = pthread_rwlock_timedwrlock;
+
+  pthread_t thread;
+  ASSERT_EQ(0, pthread_create(&thread, nullptr,
+      reinterpret_cast<void* (*)(void*)>(pthread_rwlock_wakeup_timeout_helper), &wakeup_arg));
+  WaitUntilThreadSleep(wakeup_arg.tid);
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_WAITING, wakeup_arg.progress);
+
+  ASSERT_EQ(0, pthread_join(thread, nullptr));
+  ASSERT_EQ(RwlockWakeupHelperArg::LOCK_TIMEDOUT, wakeup_arg.progress);
+  ASSERT_EQ(0, pthread_rwlock_unlock(&wakeup_arg.lock));
   ASSERT_EQ(0, pthread_rwlock_destroy(&wakeup_arg.lock));
 }
 
@@ -830,7 +979,7 @@ class RwlockKindTestHelper {
   pthread_rwlock_t lock;
 
  public:
-  RwlockKindTestHelper(int kind_type) {
+  explicit RwlockKindTestHelper(int kind_type) {
     InitRwlock(kind_type);
   }
 
@@ -967,7 +1116,7 @@ TEST(pthread, pthread_atfork_smoke) {
   ASSERT_EQ(0, pthread_atfork(AtForkPrepare1, AtForkParent1, AtForkChild1));
   ASSERT_EQ(0, pthread_atfork(AtForkPrepare2, AtForkParent2, AtForkChild2));
 
-  int pid = fork();
+  pid_t pid = fork();
   ASSERT_NE(-1, pid) << strerror(errno);
 
   // Child and parent calls are made in the order they were registered.
@@ -979,8 +1128,7 @@ TEST(pthread, pthread_atfork_smoke) {
 
   // Prepare calls are made in the reverse order.
   ASSERT_EQ(21, g_atfork_prepare_calls);
-  int status;
-  ASSERT_EQ(pid, waitpid(pid, &status, 0));
+  AssertChildExited(pid, 0);
 }
 
 TEST(pthread, pthread_attr_getscope) {
@@ -1060,28 +1208,36 @@ class pthread_CondWakeupTest : public ::testing::Test {
   };
   std::atomic<Progress> progress;
   pthread_t thread;
+  std::function<int (pthread_cond_t* cond, pthread_mutex_t* mutex)> wait_function;
 
  protected:
-  virtual void SetUp() {
-    ASSERT_EQ(0, pthread_mutex_init(&mutex, NULL));
-    ASSERT_EQ(0, pthread_cond_init(&cond, NULL));
+  void SetUp() override {
+    ASSERT_EQ(0, pthread_mutex_init(&mutex, nullptr));
+  }
+
+  void InitCond(clockid_t clock=CLOCK_REALTIME) {
+    pthread_condattr_t attr;
+    ASSERT_EQ(0, pthread_condattr_init(&attr));
+    ASSERT_EQ(0, pthread_condattr_setclock(&attr, clock));
+    ASSERT_EQ(0, pthread_cond_init(&cond, &attr));
+    ASSERT_EQ(0, pthread_condattr_destroy(&attr));
+  }
+
+  void StartWaitingThread(std::function<int (pthread_cond_t* cond, pthread_mutex_t* mutex)> wait_function) {
     progress = INITIALIZED;
-    ASSERT_EQ(0,
-      pthread_create(&thread, NULL, reinterpret_cast<void* (*)(void*)>(WaitThreadFn), this));
-  }
-
-  virtual void TearDown() {
-    ASSERT_EQ(0, pthread_join(thread, NULL));
-    ASSERT_EQ(FINISHED, progress);
-    ASSERT_EQ(0, pthread_cond_destroy(&cond));
-    ASSERT_EQ(0, pthread_mutex_destroy(&mutex));
-  }
-
-  void SleepUntilProgress(Progress expected_progress) {
-    while (progress != expected_progress) {
+    this->wait_function = wait_function;
+    ASSERT_EQ(0, pthread_create(&thread, NULL, reinterpret_cast<void* (*)(void*)>(WaitThreadFn), this));
+    while (progress != WAITING) {
       usleep(5000);
     }
     usleep(5000);
+  }
+
+  void TearDown() override {
+    ASSERT_EQ(0, pthread_join(thread, nullptr));
+    ASSERT_EQ(FINISHED, progress);
+    ASSERT_EQ(0, pthread_cond_destroy(&cond));
+    ASSERT_EQ(0, pthread_mutex_destroy(&mutex));
   }
 
  private:
@@ -1089,7 +1245,7 @@ class pthread_CondWakeupTest : public ::testing::Test {
     ASSERT_EQ(0, pthread_mutex_lock(&test->mutex));
     test->progress = WAITING;
     while (test->progress == WAITING) {
-      ASSERT_EQ(0, pthread_cond_wait(&test->cond, &test->mutex));
+      ASSERT_EQ(0, test->wait_function(&test->cond, &test->mutex));
     }
     ASSERT_EQ(SIGNALED, test->progress);
     test->progress = FINISHED;
@@ -1097,39 +1253,65 @@ class pthread_CondWakeupTest : public ::testing::Test {
   }
 };
 
-TEST_F(pthread_CondWakeupTest, signal) {
-  SleepUntilProgress(WAITING);
+TEST_F(pthread_CondWakeupTest, signal_wait) {
+  InitCond();
+  StartWaitingThread([](pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    return pthread_cond_wait(cond, mutex);
+  });
   progress = SIGNALED;
-  pthread_cond_signal(&cond);
+  ASSERT_EQ(0, pthread_cond_signal(&cond));
 }
 
-TEST_F(pthread_CondWakeupTest, broadcast) {
-  SleepUntilProgress(WAITING);
+TEST_F(pthread_CondWakeupTest, broadcast_wait) {
+  InitCond();
+  StartWaitingThread([](pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    return pthread_cond_wait(cond, mutex);
+  });
   progress = SIGNALED;
-  pthread_cond_broadcast(&cond);
+  ASSERT_EQ(0, pthread_cond_broadcast(&cond));
 }
 
-TEST(pthread, pthread_mutex_timedlock) {
-  pthread_mutex_t m;
-  ASSERT_EQ(0, pthread_mutex_init(&m, NULL));
-
-  // If the mutex is already locked, pthread_mutex_timedlock should time out.
-  ASSERT_EQ(0, pthread_mutex_lock(&m));
-
+TEST_F(pthread_CondWakeupTest, signal_timedwait_CLOCK_REALTIME) {
+  InitCond(CLOCK_REALTIME);
   timespec ts;
   ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
-  ts.tv_nsec += 1;
-  ASSERT_EQ(ETIMEDOUT, pthread_mutex_timedlock(&m, &ts));
+  ts.tv_sec += 1;
+  StartWaitingThread([&](pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    return pthread_cond_timedwait(cond, mutex, &ts);
+  });
+  progress = SIGNALED;
+  ASSERT_EQ(0, pthread_cond_signal(&cond));
+}
 
-  // If the mutex is unlocked, pthread_mutex_timedlock should succeed.
-  ASSERT_EQ(0, pthread_mutex_unlock(&m));
+TEST_F(pthread_CondWakeupTest, signal_timedwait_CLOCK_MONOTONIC) {
+  InitCond(CLOCK_MONOTONIC);
+  timespec ts;
+  ASSERT_EQ(0, clock_gettime(CLOCK_MONOTONIC, &ts));
+  ts.tv_sec += 1;
+  StartWaitingThread([&](pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    return pthread_cond_timedwait(cond, mutex, &ts);
+  });
+  progress = SIGNALED;
+  ASSERT_EQ(0, pthread_cond_signal(&cond));
+}
 
+TEST(pthread, pthread_cond_timedwait_timeout) {
+  pthread_mutex_t mutex;
+  ASSERT_EQ(0, pthread_mutex_init(&mutex, nullptr));
+  pthread_cond_t cond;
+  ASSERT_EQ(0, pthread_cond_init(&cond, nullptr));
+  ASSERT_EQ(0, pthread_mutex_lock(&mutex));
+  timespec ts;
   ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
-  ts.tv_nsec += 1;
-  ASSERT_EQ(0, pthread_mutex_timedlock(&m, &ts));
-
-  ASSERT_EQ(0, pthread_mutex_unlock(&m));
-  ASSERT_EQ(0, pthread_mutex_destroy(&m));
+  ASSERT_EQ(ETIMEDOUT, pthread_cond_timedwait(&cond, &mutex, &ts));
+  ts.tv_nsec = -1;
+  ASSERT_EQ(EINVAL, pthread_cond_timedwait(&cond, &mutex, &ts));
+  ts.tv_nsec = NS_PER_S;
+  ASSERT_EQ(EINVAL, pthread_cond_timedwait(&cond, &mutex, &ts));
+  ts.tv_nsec = NS_PER_S - 1;
+  ts.tv_sec = -1;
+  ASSERT_EQ(ETIMEDOUT, pthread_cond_timedwait(&cond, &mutex, &ts));
+  ASSERT_EQ(0, pthread_mutex_unlock(&mutex));
 }
 
 TEST(pthread, pthread_attr_getstack__main_thread) {
@@ -1155,42 +1337,36 @@ TEST(pthread, pthread_attr_getstack__main_thread) {
   // The two methods of asking for the stack size should agree.
   EXPECT_EQ(stack_size, stack_size2);
 
+#if defined(__BIONIC__)
   // What does /proc/self/maps' [stack] line say?
   void* maps_stack_hi = NULL;
-  FILE* fp = fopen("/proc/self/maps", "r");
-  ASSERT_TRUE(fp != NULL);
-  char line[BUFSIZ];
-  while (fgets(line, sizeof(line), fp) != NULL) {
-    uintptr_t lo, hi;
-    char name[10];
-    sscanf(line, "%" PRIxPTR "-%" PRIxPTR " %*4s %*x %*x:%*x %*d %10s", &lo, &hi, name);
-    if (strcmp(name, "[stack]") == 0) {
-      maps_stack_hi = reinterpret_cast<void*>(hi);
+  std::vector<map_record> maps;
+  ASSERT_TRUE(Maps::parse_maps(&maps));
+  for (const auto& map : maps) {
+    if (map.pathname == "[stack]") {
+      maps_stack_hi = reinterpret_cast<void*>(map.addr_end);
       break;
     }
   }
-  fclose(fp);
-
-  // The stack size should correspond to RLIMIT_STACK.
-  rlimit rl;
-  ASSERT_EQ(0, getrlimit(RLIMIT_STACK, &rl));
-  uint64_t original_rlim_cur = rl.rlim_cur;
-#if defined(__BIONIC__)
-  if (rl.rlim_cur == RLIM_INFINITY) {
-    rl.rlim_cur = 8 * 1024 * 1024; // Bionic reports unlimited stacks as 8MiB.
-  }
-#endif
-  EXPECT_EQ(rl.rlim_cur, stack_size);
-
-  auto guard = make_scope_guard([&rl, original_rlim_cur]() {
-    rl.rlim_cur = original_rlim_cur;
-    ASSERT_EQ(0, setrlimit(RLIMIT_STACK, &rl));
-  });
 
   // The high address of the /proc/self/maps [stack] region should equal stack_base + stack_size.
   // Remember that the stack grows down (and is mapped in on demand), so the low address of the
   // region isn't very interesting.
   EXPECT_EQ(maps_stack_hi, reinterpret_cast<uint8_t*>(stack_base) + stack_size);
+
+  // The stack size should correspond to RLIMIT_STACK.
+  rlimit rl;
+  ASSERT_EQ(0, getrlimit(RLIMIT_STACK, &rl));
+  uint64_t original_rlim_cur = rl.rlim_cur;
+  if (rl.rlim_cur == RLIM_INFINITY) {
+    rl.rlim_cur = 8 * 1024 * 1024; // Bionic reports unlimited stacks as 8MiB.
+  }
+  EXPECT_EQ(rl.rlim_cur, stack_size);
+
+  auto guard = android::base::make_scope_guard([&rl, original_rlim_cur]() {
+    rl.rlim_cur = original_rlim_cur;
+    ASSERT_EQ(0, setrlimit(RLIMIT_STACK, &rl));
+  });
 
   //
   // What if RLIMIT_STACK is smaller than the stack's current extent?
@@ -1219,6 +1395,80 @@ TEST(pthread, pthread_attr_getstack__main_thread) {
 
   EXPECT_EQ(stack_size, stack_size2);
   ASSERT_EQ(6666U, stack_size);
+#endif
+}
+
+struct GetStackSignalHandlerArg {
+  volatile bool done;
+  void* signal_stack_base;
+  size_t signal_stack_size;
+  void* main_stack_base;
+  size_t main_stack_size;
+};
+
+static GetStackSignalHandlerArg getstack_signal_handler_arg;
+
+static void getstack_signal_handler(int sig) {
+  ASSERT_EQ(SIGUSR1, sig);
+  // Use sleep() to make current thread be switched out by the kernel to provoke the error.
+  sleep(1);
+  pthread_attr_t attr;
+  ASSERT_EQ(0, pthread_getattr_np(pthread_self(), &attr));
+  void* stack_base;
+  size_t stack_size;
+  ASSERT_EQ(0, pthread_attr_getstack(&attr, &stack_base, &stack_size));
+
+  // Verify if the stack used by the signal handler is the alternate stack just registered.
+  ASSERT_LE(getstack_signal_handler_arg.signal_stack_base, &attr);
+  ASSERT_LT(static_cast<void*>(&attr),
+            static_cast<char*>(getstack_signal_handler_arg.signal_stack_base) +
+            getstack_signal_handler_arg.signal_stack_size);
+
+  // Verify if the main thread's stack got in the signal handler is correct.
+  ASSERT_EQ(getstack_signal_handler_arg.main_stack_base, stack_base);
+  ASSERT_LE(getstack_signal_handler_arg.main_stack_size, stack_size);
+
+  getstack_signal_handler_arg.done = true;
+}
+
+// The previous code obtained the main thread's stack by reading the entry in
+// /proc/self/task/<pid>/maps that was labeled [stack]. Unfortunately, on x86/x86_64, the kernel
+// relies on sp0 in task state segment(tss) to label the stack map with [stack]. If the kernel
+// switches a process while the main thread is in an alternate stack, then the kernel will label
+// the wrong map with [stack]. This test verifies that when the above situation happens, the main
+// thread's stack is found correctly.
+TEST(pthread, pthread_attr_getstack_in_signal_handler) {
+  // This test is only meaningful for the main thread, so make sure we're running on it!
+  ASSERT_EQ(getpid(), syscall(__NR_gettid));
+
+  const size_t sig_stack_size = 16 * 1024;
+  void* sig_stack = mmap(NULL, sig_stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+  ASSERT_NE(MAP_FAILED, sig_stack);
+  stack_t ss;
+  ss.ss_sp = sig_stack;
+  ss.ss_size = sig_stack_size;
+  ss.ss_flags = 0;
+  stack_t oss;
+  ASSERT_EQ(0, sigaltstack(&ss, &oss));
+
+  pthread_attr_t attr;
+  ASSERT_EQ(0, pthread_getattr_np(pthread_self(), &attr));
+  void* main_stack_base;
+  size_t main_stack_size;
+  ASSERT_EQ(0, pthread_attr_getstack(&attr, &main_stack_base, &main_stack_size));
+
+  ScopedSignalHandler handler(SIGUSR1, getstack_signal_handler, SA_ONSTACK);
+  getstack_signal_handler_arg.done = false;
+  getstack_signal_handler_arg.signal_stack_base = sig_stack;
+  getstack_signal_handler_arg.signal_stack_size = sig_stack_size;
+  getstack_signal_handler_arg.main_stack_base = main_stack_base;
+  getstack_signal_handler_arg.main_stack_size = main_stack_size;
+  kill(getpid(), SIGUSR1);
+  ASSERT_EQ(true, getstack_signal_handler_arg.done);
+
+  ASSERT_EQ(0, sigaltstack(&oss, nullptr));
+  ASSERT_EQ(0, munmap(sig_stack, sig_stack_size));
 }
 
 static void pthread_attr_getstack_18908062_helper(void*) {
@@ -1245,11 +1495,14 @@ TEST(pthread, pthread_attr_getstack_18908062) {
 }
 
 #if defined(__BIONIC__)
-static pthread_mutex_t gettid_mutex;
+static pthread_mutex_t pthread_gettid_np_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static void* pthread_gettid_np_helper(void* arg) {
-  pthread_mutex_lock(&gettid_mutex);
   *reinterpret_cast<pid_t*>(arg) = gettid();
-  pthread_mutex_unlock(&gettid_mutex);
+
+  // Wait for our parent to call pthread_gettid_np on us before exiting.
+  pthread_mutex_lock(&pthread_gettid_np_mutex);
+  pthread_mutex_unlock(&pthread_gettid_np_mutex);
   return NULL;
 }
 #endif
@@ -1258,17 +1511,19 @@ TEST(pthread, pthread_gettid_np) {
 #if defined(__BIONIC__)
   ASSERT_EQ(gettid(), pthread_gettid_np(pthread_self()));
 
+  // Ensure the other thread doesn't exit until after we've called
+  // pthread_gettid_np on it.
+  pthread_mutex_lock(&pthread_gettid_np_mutex);
+
   pid_t t_gettid_result;
   pthread_t t;
-  pthread_mutex_init(&gettid_mutex, NULL);
-  pthread_mutex_lock(&gettid_mutex);
   pthread_create(&t, NULL, pthread_gettid_np_helper, &t_gettid_result);
 
   pid_t t_pthread_gettid_np_result = pthread_gettid_np(t);
-  pthread_mutex_unlock(&gettid_mutex);
 
+  // Release the other thread and wait for it to exit.
+  pthread_mutex_unlock(&pthread_gettid_np_mutex);
   pthread_join(t, NULL);
-  pthread_mutex_destroy(&gettid_mutex);
 
   ASSERT_EQ(t_gettid_result, t_pthread_gettid_np_result);
 #else
@@ -1341,7 +1596,7 @@ TEST(pthread, pthread_mutexattr_gettype) {
 struct PthreadMutex {
   pthread_mutex_t lock;
 
-  PthreadMutex(int mutex_type) {
+  explicit PthreadMutex(int mutex_type) {
     init(mutex_type);
   }
 
@@ -1370,6 +1625,9 @@ TEST(pthread, pthread_mutex_lock_NORMAL) {
 
   ASSERT_EQ(0, pthread_mutex_lock(&m.lock));
   ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
+  ASSERT_EQ(0, pthread_mutex_trylock(&m.lock));
+  ASSERT_EQ(EBUSY, pthread_mutex_trylock(&m.lock));
+  ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
 }
 
 TEST(pthread, pthread_mutex_lock_ERRORCHECK) {
@@ -1392,6 +1650,8 @@ TEST(pthread, pthread_mutex_lock_RECURSIVE) {
   ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
   ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
   ASSERT_EQ(0, pthread_mutex_trylock(&m.lock));
+  ASSERT_EQ(0, pthread_mutex_trylock(&m.lock));
+  ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
   ASSERT_EQ(0, pthread_mutex_unlock(&m.lock));
   ASSERT_EQ(EPERM, pthread_mutex_unlock(&m.lock));
 }
@@ -1437,7 +1697,7 @@ class MutexWakeupHelper {
   }
 
  public:
-  MutexWakeupHelper(int mutex_type) : m(mutex_type) {
+  explicit MutexWakeupHelper(int mutex_type) : m(mutex_type) {
   }
 
   void test() {
@@ -1489,6 +1749,35 @@ TEST(pthread, pthread_mutex_owner_tid_limit) {
 #endif
 }
 
+TEST(pthread, pthread_mutex_timedlock) {
+  pthread_mutex_t m;
+  ASSERT_EQ(0, pthread_mutex_init(&m, nullptr));
+
+  // If the mutex is already locked, pthread_mutex_timedlock should time out.
+  ASSERT_EQ(0, pthread_mutex_lock(&m));
+
+  timespec ts;
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ASSERT_EQ(ETIMEDOUT, pthread_mutex_timedlock(&m, &ts));
+  ts.tv_nsec = -1;
+  ASSERT_EQ(EINVAL, pthread_mutex_timedlock(&m, &ts));
+  ts.tv_nsec = NS_PER_S;
+  ASSERT_EQ(EINVAL, pthread_mutex_timedlock(&m, &ts));
+  ts.tv_nsec = NS_PER_S - 1;
+  ts.tv_sec = -1;
+  ASSERT_EQ(ETIMEDOUT, pthread_mutex_timedlock(&m, &ts));
+
+  // If the mutex is unlocked, pthread_mutex_timedlock should succeed.
+  ASSERT_EQ(0, pthread_mutex_unlock(&m));
+
+  ASSERT_EQ(0, clock_gettime(CLOCK_REALTIME, &ts));
+  ts.tv_sec += 1;
+  ASSERT_EQ(0, pthread_mutex_timedlock(&m, &ts));
+
+  ASSERT_EQ(0, pthread_mutex_unlock(&m));
+  ASSERT_EQ(0, pthread_mutex_destroy(&m));
+}
+
 class StrictAlignmentAllocator {
  public:
   void* allocate(size_t size, size_t alignment) {
@@ -1501,8 +1790,8 @@ class StrictAlignmentAllocator {
   }
 
   ~StrictAlignmentAllocator() {
-    for (auto& p : allocated_array) {
-      delete [] p;
+    for (const auto& p : allocated_array) {
+      delete[] p;
     }
   }
 
@@ -1548,7 +1837,14 @@ TEST(pthread, pthread_types_allow_four_bytes_alignment) {
 
 TEST(pthread, pthread_mutex_lock_null_32) {
 #if defined(__BIONIC__) && !defined(__LP64__)
-  ASSERT_EQ(EINVAL, pthread_mutex_lock(NULL));
+  // For LP32, the pthread lock/unlock functions allow a NULL mutex and return
+  // EINVAL in that case: http://b/19995172.
+  //
+  // We decorate the public defintion with _Nonnull so that people recompiling
+  // their code with get a warning and might fix their bug, but need to pass
+  // NULL here to test that we remain compatible.
+  pthread_mutex_t* null_value = nullptr;
+  ASSERT_EQ(EINVAL, pthread_mutex_lock(null_value));
 #else
   GTEST_LOG_(INFO) << "This test tests bionic implementation details on 32 bit devices.";
 #endif
@@ -1556,7 +1852,14 @@ TEST(pthread, pthread_mutex_lock_null_32) {
 
 TEST(pthread, pthread_mutex_unlock_null_32) {
 #if defined(__BIONIC__) && !defined(__LP64__)
-  ASSERT_EQ(EINVAL, pthread_mutex_unlock(NULL));
+  // For LP32, the pthread lock/unlock functions allow a NULL mutex and return
+  // EINVAL in that case: http://b/19995172.
+  //
+  // We decorate the public defintion with _Nonnull so that people recompiling
+  // their code with get a warning and might fix their bug, but need to pass
+  // NULL here to test that we remain compatible.
+  pthread_mutex_t* null_value = nullptr;
+  ASSERT_EQ(EINVAL, pthread_mutex_unlock(null_value));
 #else
   GTEST_LOG_(INFO) << "This test tests bionic implementation details on 32 bit devices.";
 #endif
@@ -1584,21 +1887,238 @@ extern _Unwind_Reason_Code FrameCounter(_Unwind_Context* ctx, void* arg);
 
 static volatile bool signal_handler_on_altstack_done;
 
-static void SignalHandlerOnAltStack(int signo, siginfo_t*, void*) {
-  ASSERT_EQ(SIGUSR1, signo);
+__attribute__((__noinline__))
+static void signal_handler_backtrace() {
   // Check if we have enough stack space for unwinding.
   int count = 0;
   _Unwind_Backtrace(FrameCounter, &count);
   ASSERT_GT(count, 0);
+}
+
+__attribute__((__noinline__))
+static void signal_handler_logging() {
   // Check if we have enough stack space for logging.
   std::string s(2048, '*');
   GTEST_LOG_(INFO) << s;
   signal_handler_on_altstack_done = true;
 }
 
-TEST(pthread, big_enough_signal_stack_for_64bit_arch) {
+__attribute__((__noinline__))
+static void signal_handler_snprintf() {
+  // Check if we have enough stack space for snprintf to a PATH_MAX buffer, plus some extra.
+  char buf[PATH_MAX + 2048];
+  ASSERT_GT(snprintf(buf, sizeof(buf), "/proc/%d/status", getpid()), 0);
+}
+
+static void SignalHandlerOnAltStack(int signo, siginfo_t*, void*) {
+  ASSERT_EQ(SIGUSR1, signo);
+  signal_handler_backtrace();
+  signal_handler_logging();
+  signal_handler_snprintf();
+}
+
+TEST(pthread, big_enough_signal_stack) {
   signal_handler_on_altstack_done = false;
   ScopedSignalHandler handler(SIGUSR1, SignalHandlerOnAltStack, SA_SIGINFO | SA_ONSTACK);
   kill(getpid(), SIGUSR1);
   ASSERT_TRUE(signal_handler_on_altstack_done);
+}
+
+TEST(pthread, pthread_barrierattr_smoke) {
+  pthread_barrierattr_t attr;
+  ASSERT_EQ(0, pthread_barrierattr_init(&attr));
+  int pshared;
+  ASSERT_EQ(0, pthread_barrierattr_getpshared(&attr, &pshared));
+  ASSERT_EQ(PTHREAD_PROCESS_PRIVATE, pshared);
+  ASSERT_EQ(0, pthread_barrierattr_setpshared(&attr, PTHREAD_PROCESS_SHARED));
+  ASSERT_EQ(0, pthread_barrierattr_getpshared(&attr, &pshared));
+  ASSERT_EQ(PTHREAD_PROCESS_SHARED, pshared);
+  ASSERT_EQ(0, pthread_barrierattr_destroy(&attr));
+}
+
+struct BarrierTestHelperData {
+  size_t thread_count;
+  pthread_barrier_t barrier;
+  std::atomic<int> finished_mask;
+  std::atomic<int> serial_thread_count;
+  size_t iteration_count;
+  std::atomic<size_t> finished_iteration_count;
+
+  BarrierTestHelperData(size_t thread_count, size_t iteration_count)
+      : thread_count(thread_count), finished_mask(0), serial_thread_count(0),
+        iteration_count(iteration_count), finished_iteration_count(0) {
+  }
+};
+
+struct BarrierTestHelperArg {
+  int id;
+  BarrierTestHelperData* data;
+};
+
+static void BarrierTestHelper(BarrierTestHelperArg* arg) {
+  for (size_t i = 0; i < arg->data->iteration_count; ++i) {
+    int result = pthread_barrier_wait(&arg->data->barrier);
+    if (result == PTHREAD_BARRIER_SERIAL_THREAD) {
+      arg->data->serial_thread_count++;
+    } else {
+      ASSERT_EQ(0, result);
+    }
+    int mask = arg->data->finished_mask.fetch_or(1 << arg->id);
+    mask |= 1 << arg->id;
+    if (mask == ((1 << arg->data->thread_count) - 1)) {
+      ASSERT_EQ(1, arg->data->serial_thread_count);
+      arg->data->finished_iteration_count++;
+      arg->data->finished_mask = 0;
+      arg->data->serial_thread_count = 0;
+    }
+  }
+}
+
+TEST(pthread, pthread_barrier_smoke) {
+  const size_t BARRIER_ITERATION_COUNT = 10;
+  const size_t BARRIER_THREAD_COUNT = 10;
+  BarrierTestHelperData data(BARRIER_THREAD_COUNT, BARRIER_ITERATION_COUNT);
+  ASSERT_EQ(0, pthread_barrier_init(&data.barrier, nullptr, data.thread_count));
+  std::vector<pthread_t> threads(data.thread_count);
+  std::vector<BarrierTestHelperArg> args(threads.size());
+  for (size_t i = 0; i < threads.size(); ++i) {
+    args[i].id = i;
+    args[i].data = &data;
+    ASSERT_EQ(0, pthread_create(&threads[i], nullptr,
+                                reinterpret_cast<void* (*)(void*)>(BarrierTestHelper), &args[i]));
+  }
+  for (size_t i = 0; i < threads.size(); ++i) {
+    ASSERT_EQ(0, pthread_join(threads[i], nullptr));
+  }
+  ASSERT_EQ(data.iteration_count, data.finished_iteration_count);
+  ASSERT_EQ(0, pthread_barrier_destroy(&data.barrier));
+}
+
+struct BarrierDestroyTestArg {
+  std::atomic<int> tid;
+  pthread_barrier_t* barrier;
+};
+
+static void BarrierDestroyTestHelper(BarrierDestroyTestArg* arg) {
+  arg->tid = gettid();
+  ASSERT_EQ(0, pthread_barrier_wait(arg->barrier));
+}
+
+TEST(pthread, pthread_barrier_destroy) {
+  pthread_barrier_t barrier;
+  ASSERT_EQ(0, pthread_barrier_init(&barrier, nullptr, 2));
+  pthread_t thread;
+  BarrierDestroyTestArg arg;
+  arg.tid = 0;
+  arg.barrier = &barrier;
+  ASSERT_EQ(0, pthread_create(&thread, nullptr,
+                              reinterpret_cast<void* (*)(void*)>(BarrierDestroyTestHelper), &arg));
+  WaitUntilThreadSleep(arg.tid);
+  ASSERT_EQ(EBUSY, pthread_barrier_destroy(&barrier));
+  ASSERT_EQ(PTHREAD_BARRIER_SERIAL_THREAD, pthread_barrier_wait(&barrier));
+  // Verify if the barrier can be destroyed directly after pthread_barrier_wait().
+  ASSERT_EQ(0, pthread_barrier_destroy(&barrier));
+  ASSERT_EQ(0, pthread_join(thread, nullptr));
+#if defined(__BIONIC__)
+  ASSERT_EQ(EINVAL, pthread_barrier_destroy(&barrier));
+#endif
+}
+
+struct BarrierOrderingTestHelperArg {
+  pthread_barrier_t* barrier;
+  size_t* array;
+  size_t array_length;
+  size_t id;
+};
+
+void BarrierOrderingTestHelper(BarrierOrderingTestHelperArg* arg) {
+  const size_t ITERATION_COUNT = 10000;
+  for (size_t i = 1; i <= ITERATION_COUNT; ++i) {
+    arg->array[arg->id] = i;
+    int result = pthread_barrier_wait(arg->barrier);
+    ASSERT_TRUE(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+    for (size_t j = 0; j < arg->array_length; ++j) {
+      ASSERT_EQ(i, arg->array[j]);
+    }
+    result = pthread_barrier_wait(arg->barrier);
+    ASSERT_TRUE(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+  }
+}
+
+TEST(pthread, pthread_barrier_check_ordering) {
+  const size_t THREAD_COUNT = 4;
+  pthread_barrier_t barrier;
+  ASSERT_EQ(0, pthread_barrier_init(&barrier, nullptr, THREAD_COUNT));
+  size_t array[THREAD_COUNT];
+  std::vector<pthread_t> threads(THREAD_COUNT);
+  std::vector<BarrierOrderingTestHelperArg> args(THREAD_COUNT);
+  for (size_t i = 0; i < THREAD_COUNT; ++i) {
+    args[i].barrier = &barrier;
+    args[i].array = array;
+    args[i].array_length = THREAD_COUNT;
+    args[i].id = i;
+    ASSERT_EQ(0, pthread_create(&threads[i], nullptr,
+                                reinterpret_cast<void* (*)(void*)>(BarrierOrderingTestHelper),
+                                &args[i]));
+  }
+  for (size_t i = 0; i < THREAD_COUNT; ++i) {
+    ASSERT_EQ(0, pthread_join(threads[i], nullptr));
+  }
+}
+
+TEST(pthread, pthread_spinlock_smoke) {
+  pthread_spinlock_t lock;
+  ASSERT_EQ(0, pthread_spin_init(&lock, 0));
+  ASSERT_EQ(0, pthread_spin_trylock(&lock));
+  ASSERT_EQ(0, pthread_spin_unlock(&lock));
+  ASSERT_EQ(0, pthread_spin_lock(&lock));
+  ASSERT_EQ(EBUSY, pthread_spin_trylock(&lock));
+  ASSERT_EQ(0, pthread_spin_unlock(&lock));
+  ASSERT_EQ(0, pthread_spin_destroy(&lock));
+}
+
+TEST(pthread, pthread_attr_setdetachstate) {
+  pthread_attr_t attr;
+  ASSERT_EQ(0, pthread_attr_init(&attr));
+
+  ASSERT_EQ(0, pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
+  ASSERT_EQ(0, pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE));
+  ASSERT_EQ(EINVAL, pthread_attr_setdetachstate(&attr, 123));
+}
+
+TEST(pthread, pthread_create__mmap_failures) {
+  pthread_attr_t attr;
+  ASSERT_EQ(0, pthread_attr_init(&attr));
+  ASSERT_EQ(0, pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
+
+  const auto kPageSize = sysconf(_SC_PAGE_SIZE);
+
+  // Use up all the VMAs. By default this is 64Ki.
+  std::vector<void*> pages;
+  int prot = PROT_NONE;
+  while (true) {
+    void* page = mmap(nullptr, kPageSize, prot, MAP_ANON|MAP_PRIVATE, -1, 0);
+    if (page == MAP_FAILED) break;
+    pages.push_back(page);
+    prot = (prot == PROT_NONE) ? PROT_READ : PROT_NONE;
+  }
+
+  // Try creating threads, freeing up a page each time we fail.
+  size_t EAGAIN_count = 0;
+  size_t i = 0;
+  for (; i < pages.size(); ++i) {
+    pthread_t t;
+    int status = pthread_create(&t, &attr, IdFn, nullptr);
+    if (status != EAGAIN) break;
+    ++EAGAIN_count;
+    ASSERT_EQ(0, munmap(pages[i], kPageSize));
+  }
+
+  // Creating a thread uses at least six VMAs: the stack, the TLS, and a guard each side of both.
+  // So we should have seen at least six failures.
+  ASSERT_GE(EAGAIN_count, 6U);
+
+  for (; i < pages.size(); ++i) {
+    ASSERT_EQ(0, munmap(pages[i], kPageSize));
+  }
 }

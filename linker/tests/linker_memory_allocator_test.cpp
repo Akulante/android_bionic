@@ -1,17 +1,29 @@
 /*
  * Copyright (C) 2013 The Android Open Source Project
+ * All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #include <stdlib.h>
@@ -53,7 +65,7 @@ TEST(linker_memory, test_alloc_0) {
   LinkerMemoryAllocator allocator;
   void* ptr = allocator.alloc(0);
   ASSERT_TRUE(ptr != nullptr);
-  free(ptr);
+  allocator.free(ptr);
 }
 
 TEST(linker_memory, test_free_nullptr) {
@@ -96,6 +108,7 @@ TEST(linker_memory, test_realloc) {
 
   ASSERT_TRUE(reallocated_ptr != nullptr);
   ASSERT_TRUE(reallocated_ptr != array);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(reallocated_ptr) % 16);
 
   ASSERT_TRUE(memcmp(reallocated_ptr, model, array_size * 2) == 0);
 
@@ -107,10 +120,11 @@ TEST(linker_memory, test_realloc) {
 
   ASSERT_TRUE(reallocated_ptr != nullptr);
   ASSERT_TRUE(reallocated_ptr != array);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(reallocated_ptr) % 16);
 
   ASSERT_TRUE(memcmp(reallocated_ptr, model, 4000) == 0);
 
-  ASSERT_EQ(nullptr, realloc(reallocated_ptr, 0));
+  ASSERT_EQ(nullptr, allocator.realloc(reallocated_ptr, 0));
 }
 
 TEST(linker_memory, test_small_smoke) {
@@ -125,7 +139,10 @@ TEST(linker_memory, test_small_smoke) {
       reinterpret_cast<test_struct_small*>(allocator.alloc(sizeof(test_struct_small)));
 
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
+
   ASSERT_EQ(reinterpret_cast<uintptr_t>(ptr1)+16, reinterpret_cast<uintptr_t>(ptr2));
   ASSERT_TRUE(memcmp(ptr1, zeros, 16) == 0);
 
@@ -143,7 +160,9 @@ TEST(linker_memory, test_huge_smoke) {
       reinterpret_cast<test_struct_huge*>(allocator.alloc(sizeof(test_struct_huge)));
 
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
 
   ASSERT_TRUE(
       reinterpret_cast<uintptr_t>(ptr1)/kPageSize != reinterpret_cast<uintptr_t>(ptr2)/kPageSize);
@@ -160,7 +179,9 @@ TEST(linker_memory, test_large) {
       reinterpret_cast<test_struct_large*>(allocator.alloc(1024));
 
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
 
   ASSERT_EQ(reinterpret_cast<uintptr_t>(ptr1) + 1024, reinterpret_cast<uintptr_t>(ptr2));
 
@@ -179,6 +200,7 @@ TEST(linker_memory, test_large) {
       reinterpret_cast<test_struct_large*>(allocator.alloc(sizeof(test_struct_large)));
 
   ASSERT_TRUE(ptr_to_free != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr_to_free) % 16);
 
   allocator.free(ptr1);
 

@@ -1,17 +1,29 @@
 /*
  * Copyright (C) 2013 The Android Open Source Project
+ * All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #include <stdlib.h>
@@ -53,10 +65,12 @@ TEST(linker_allocator, test_nominal) {
 
   test_struct_nominal* ptr1 = allocator.alloc();
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   test_struct_nominal* ptr2 = allocator.alloc();
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
   // they should be next to each other.
-  ASSERT_EQ(ptr1+1, ptr2);
+  ASSERT_EQ(reinterpret_cast<uint8_t*>(ptr1)+16, reinterpret_cast<uint8_t*>(ptr2));
 
   ptr1->value = 42;
 
@@ -71,8 +85,10 @@ TEST(linker_allocator, test_small) {
   char* ptr2 = reinterpret_cast<char*>(allocator.alloc());
 
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
-  ASSERT_EQ(ptr1+2*sizeof(void*), ptr2);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
+  ASSERT_EQ(ptr1+16, ptr2); // aligned to 16
 }
 
 TEST(linker_allocator, test_larger) {
@@ -82,9 +98,11 @@ TEST(linker_allocator, test_larger) {
   test_struct_larger* ptr2 = allocator.alloc();
 
   ASSERT_TRUE(ptr1 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr1) % 16);
   ASSERT_TRUE(ptr2 != nullptr);
+  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr2) % 16);
 
-  ASSERT_EQ(ptr1+1, ptr2);
+  ASSERT_EQ(reinterpret_cast<uint8_t*>(ptr1) + 1024, reinterpret_cast<uint8_t*>(ptr2));
 
   // lets allocate until we reach next page.
   size_t n = kPageSize/sizeof(test_struct_larger) + 1 - 2;

@@ -26,9 +26,13 @@
  * SUCH DAMAGE.
  */
 
+<<<<<<< HEAD
 #include <machine/cpu-features.h>
 #include <private/bionic_asm.h>
 #include <private/libc_events.h>
+=======
+#include <private/bionic_asm.h>
+>>>>>>> android_bionic/lineage-15.1
 
         /*
          * Optimized memset() for ARM.
@@ -39,15 +43,26 @@
         .fpu        neon
         .syntax     unified
 
+<<<<<<< HEAD
 ENTRY(__memset_chk)
         cmp         r2, r3
         bls         .L_done
+=======
+        // To avoid warning about deprecated instructions, add an explicit
+        // arch. The code generated is exactly the same.
+        .arch armv7-a
+
+ENTRY(__memset_chk)
+        cmp         r2, r3
+        bls         memset
+>>>>>>> android_bionic/lineage-15.1
 
         // Preserve lr for backtrace.
         push        {lr}
         .cfi_def_cfa_offset 4
         .cfi_rel_offset lr, 0
 
+<<<<<<< HEAD
         ldr         r0, error_message
         ldr         r1, error_code
 1:
@@ -66,6 +81,11 @@ ENTRY(bzero)
         // Fall through to memset...
 END(bzero)
 
+=======
+        bl          __memset_chk_fail
+END(__memset_chk)
+
+>>>>>>> android_bionic/lineage-15.1
 ENTRY(memset)
         mov         r3, r0
         // At this point only d0, d1 are going to be used below.
@@ -174,7 +194,10 @@ ENTRY(memset)
         strbcs      r1, [r3], #1
         bx          lr
 END(memset)
+<<<<<<< HEAD
 
         .data
 error_string:
         .string     "memset: prevented write past end of buffer"
+=======
+>>>>>>> android_bionic/lineage-15.1

@@ -31,11 +31,17 @@
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
-#include <fcntl.h> /* For O_CLOEXEC. */
 #include <signal.h> /* For sigset_t. */
+
+#include <linux/eventpoll.h>
+/* TODO: https://lkml.org/lkml/2017/2/23/416 has a better fix. */
+#undef EPOLLWAKEUP
+#undef EPOLLONESHOT
+#undef EPOLLET
 
 __BEGIN_DECLS
 
+/* TODO: remove once https://lkml.org/lkml/2017/2/23/417 is upstream. */
 #define EPOLLIN          0x00000001
 #define EPOLLPRI         0x00000002
 #define EPOLLOUT         0x00000004
@@ -50,12 +56,6 @@ __BEGIN_DECLS
 #define EPOLLWAKEUP      0x20000000
 #define EPOLLONESHOT     0x40000000
 #define EPOLLET          0x80000000
-
-#define EPOLL_CTL_ADD    1
-#define EPOLL_CTL_DEL    2
-#define EPOLL_CTL_MOD    3
-
-#define EPOLL_CLOEXEC O_CLOEXEC
 
 typedef union epoll_data {
   void* ptr;
@@ -74,10 +74,26 @@ __packed
 ;
 
 int epoll_create(int);
-int epoll_create1(int);
+int epoll_create1(int) __INTRODUCED_IN(21);
+
+/*
+ * Some third-party code uses the existence of EPOLL_CLOEXEC to detect the
+ * availability of epoll_create1. This is not correct, since having up-to-date
+ * UAPI headers says nothing about the C library, but for the time being we
+ * don't want to harm adoption to the unified headers. We'll undef EPOLL_CLOEXEC
+ * if we don't have epoll_create1 for the time being, and maybe revisit this
+ * later.
+ *
+ * https://github.com/android-ndk/ndk/issues/302
+ * https://github.com/android-ndk/ndk/issues/394
+ */
+#if __ANDROID_API__ < __ANDROID_API_L__ && defined(EPOLL_CLOEXEC)
+#undef EPOLL_CLOEXEC
+#endif
+
 int epoll_ctl(int, int, int, struct epoll_event*);
 int epoll_wait(int, struct epoll_event*, int, int);
-int epoll_pwait(int, struct epoll_event*, int, int, const sigset_t*);
+int epoll_pwait(int, struct epoll_event*, int, int, const sigset_t*) __INTRODUCED_IN(21);
 
 __END_DECLS
 

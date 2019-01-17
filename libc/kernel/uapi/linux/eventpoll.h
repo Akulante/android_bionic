@@ -20,25 +20,21 @@
 #define _UAPI_LINUX_EVENTPOLL_H
 #include <linux/fcntl.h>
 #include <linux/types.h>
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
 #define EPOLL_CLOEXEC O_CLOEXEC
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
+#define EPOLLEXCLUSIVE (1 << 28)
 #define EPOLLWAKEUP (1 << 29)
 #define EPOLLONESHOT (1 << 30)
 #define EPOLLET (1 << 31)
 #ifdef __x86_64__
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
 #define EPOLL_PACKED __attribute__((packed))
 #else
 #define EPOLL_PACKED
 #endif
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
-struct epoll_event {
+struct __kernel_uapi_epoll_event {
   __u32 events;
   __u64 data;
 } EPOLL_PACKED;
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
 #endif

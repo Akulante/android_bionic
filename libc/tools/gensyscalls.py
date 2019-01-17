@@ -62,9 +62,11 @@ ENTRY(%(func)s)
 
 arm_eabi_call_default = syscall_stub_header + """\
     mov     ip, r7
+    .cfi_register r7, ip
     ldr     r7, =%(__NR_name)s
     swi     #0
     mov     r7, ip
+    .cfi_restore r7
     cmn     r0, #(MAX_ERRNO + 1)
     bxls    lr
     neg     r0, r0
@@ -166,9 +168,20 @@ END(%(func)s)
 
 x86_registers = [ "ebx", "ecx", "edx", "esi", "edi", "ebp" ]
 
+x86_call_prepare = """\
+
+    call    __kernel_syscall
+    pushl   %eax
+    .cfi_adjust_cfa_offset 4
+    .cfi_rel_offset eax, 0
+
+"""
+
 x86_call = """\
     movl    $%(__NR_name)s, %%eax
-    int     $0x80
+    call    *(%%esp)
+    addl    $4, %%esp
+
     cmpl    $-MAX_ERRNO, %%eax
     jb      1f
     negl    %%eax
@@ -311,7 +324,7 @@ def x86_genstub(syscall):
     result     = syscall_stub_header % syscall
 
     numparams = count_generic_param_registers(syscall["params"])
-    stack_bias = numparams*4 + 4
+    stack_bias = numparams*4 + 8
     offset = 0
     mov_result = ""
     first_push = True
@@ -327,6 +340,7 @@ def x86_genstub(syscall):
         mov_result += "    mov     %d(%%esp), %%%s\n" % (stack_bias+offset, register)
         offset += 4
 
+    result += x86_call_prepare
     result += mov_result
     result += x86_call % syscall
 
@@ -352,7 +366,9 @@ def x86_genstub_socketcall(syscall):
     result += "    pushl   %ecx\n"
     result += "    .cfi_adjust_cfa_offset 4\n"
     result += "    .cfi_rel_offset ecx, 0\n"
-    stack_bias = 12
+    stack_bias = 16
+
+    result += x86_call_prepare
 
     # set the call id (%ebx)
     result += "    mov     $%d, %%ebx\n" % syscall["socketcall_id"]
@@ -484,18 +500,18 @@ class SysCallsTxtParser:
 
         logging.debug(t)
 
-
-    def parse_file(self, file_path):
-        logging.debug("parse_file: %s" % file_path)
-        fp = open(file_path)
-        for line in fp.xreadlines():
+    def parse_open_file(self, fp):
+        for line in fp:
             self.lineno += 1
             line = line.strip()
             if not line: continue
             if line[0] == '#': continue
             self.parse_line(line)
 
-        fp.close()
+    def parse_file(self, file_path):
+        logging.debug("parse_file: %s" % file_path)
+        with open(file_path) as fp:
+            self.parse_open_file(fp)
 
 
 class State:
@@ -539,41 +555,46 @@ class State:
             if syscall.has_key("x86_64"):
                 syscall["asm-x86_64"] = add_footer(64, x86_64_genstub(syscall), syscall)
 
-    # Scan a Linux kernel asm/unistd.h file containing __NR_* constants
+
+    # Scan Linux kernel asm/unistd.h files containing __NR_* constants
     # and write out equivalent SYS_* constants for glibc source compatibility.
-    def scan_linux_unistd_h(self, fp, path):
-        pattern = re.compile(r'^#define __NR_([a-z]\S+) .*')
-        syscalls = set() # MIPS defines everything three times; work around that.
-        for line in open(path):
-            m = re.search(pattern, line)
-            if m:
-                syscalls.add(m.group(1))
-        for syscall in sorted(syscalls):
-            fp.write("#define SYS_%s %s\n" % (syscall, make__NR_name(syscall)))
-
-
     def gen_glibc_syscalls_h(self):
-        # TODO: generate a separate file for each architecture, like glibc's bits/syscall.h.
-        glibc_syscalls_h_path = "include/sys/glibc-syscalls.h"
+        glibc_syscalls_h_path = "include/bits/glibc-syscalls.h"
         logging.info("generating " + glibc_syscalls_h_path)
         glibc_fp = create_file(glibc_syscalls_h_path)
         glibc_fp.write("/* %s */\n" % warning)
-        glibc_fp.write("#ifndef _BIONIC_GLIBC_SYSCALLS_H_\n")
-        glibc_fp.write("#define _BIONIC_GLIBC_SYSCALLS_H_\n")
+        glibc_fp.write("#ifndef _BIONIC_BITS_GLIBC_SYSCALLS_H_\n")
+        glibc_fp.write("#define _BIONIC_BITS_GLIBC_SYSCALLS_H_\n")
 
-        glibc_fp.write("#if defined(__aarch64__)\n")
-        self.scan_linux_unistd_h(glibc_fp, os.path.join(bionic_libc_root, "kernel/uapi/asm-generic/unistd.h"))
-        glibc_fp.write("#elif defined(__arm__)\n")
-        self.scan_linux_unistd_h(glibc_fp, os.path.join(bionic_libc_root, "kernel/uapi/asm-arm/asm/unistd.h"))
-        glibc_fp.write("#elif defined(__mips__)\n")
-        self.scan_linux_unistd_h(glibc_fp, os.path.join(bionic_libc_root, "kernel/uapi/asm-mips/asm/unistd.h"))
-        glibc_fp.write("#elif defined(__i386__)\n")
-        self.scan_linux_unistd_h(glibc_fp, os.path.join(bionic_libc_root, "kernel/uapi/asm-x86/asm/unistd_32.h"))
-        glibc_fp.write("#elif defined(__x86_64__)\n")
-        self.scan_linux_unistd_h(glibc_fp, os.path.join(bionic_libc_root, "kernel/uapi/asm-x86/asm/unistd_64.h"))
-        glibc_fp.write("#endif\n")
+        # Collect the set of all syscalls for all architectures.
+        syscalls = set()
+        pattern = re.compile(r'^\s*#\s*define\s*__NR_([a-z]\S+)')
+        for unistd_h in ["kernel/uapi/asm-generic/unistd.h",
+                         "kernel/uapi/asm-arm/asm/unistd.h",
+                         "kernel/uapi/asm-arm/asm/unistd-common.h",
+                         "kernel/uapi/asm-arm/asm/unistd-eabi.h",
+                         "kernel/uapi/asm-arm/asm/unistd-oabi.h",
+                         "kernel/uapi/asm-mips/asm/unistd.h",
+                         "kernel/uapi/asm-x86/asm/unistd_32.h",
+                         "kernel/uapi/asm-x86/asm/unistd_64.h"]:
+          for line in open(os.path.join(bionic_libc_root, unistd_h)):
+            m = re.search(pattern, line)
+            if m:
+              nr_name = m.group(1)
+              if 'reserved' not in nr_name and 'unused' not in nr_name:
+                syscalls.add(nr_name)
 
-        glibc_fp.write("#endif /* _BIONIC_GLIBC_SYSCALLS_H_ */\n")
+        # Write out a single file listing them all. Note that the input
+        # files include #if trickery, so even for a single architecture
+        # we don't know exactly which ones are available.
+        # https://code.google.com/p/android/issues/detail?id=215853
+        for syscall in sorted(syscalls):
+          nr_name = make__NR_name(syscall)
+          glibc_fp.write("#if defined(%s)\n" % nr_name)
+          glibc_fp.write("  #define SYS_%s %s\n" % (syscall, nr_name))
+          glibc_fp.write("#endif\n")
+
+        glibc_fp.write("#endif /* _BIONIC_BITS_GLIBC_SYSCALLS_H_ */\n")
         glibc_fp.close()
         self.other_files.append(glibc_syscalls_h_path)
 
@@ -656,6 +677,7 @@ class State:
 
 logging.basicConfig(level=logging.INFO)
 
-state = State()
-state.process_file(os.path.join(bionic_libc_root, "SYSCALLS.TXT"))
-state.regenerate()
+if __name__ == "__main__":
+    state = State()
+    state.process_file(os.path.join(bionic_libc_root, "SYSCALLS.TXT"))
+    state.regenerate()

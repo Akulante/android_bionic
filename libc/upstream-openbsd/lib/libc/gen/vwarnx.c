@@ -1,4 +1,4 @@
-/*	$OpenBSD: vwarnx.c,v 1.9 2012/12/05 23:20:00 deraadt Exp $ */
+/*	$OpenBSD: vwarnx.c,v 1.11 2016/03/13 18:34:20 guenther Exp $ */
 /*-
  * Copyright (c) 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -30,18 +30,15 @@
 
 #include <err.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 
-extern char *__progname;		/* Program name, from crt0. */
-
 void
-_vwarnx(const char *fmt, va_list ap)
+vwarnx(const char *fmt, va_list ap)
 {
 	(void)fprintf(stderr, "%s: ", __progname);
 	if (fmt != NULL)
 		(void)vfprintf(stderr, fmt, ap);
 	(void)fprintf(stderr, "\n");
 }
-
-__weak_alias(vwarnx, _vwarnx);
-
+DEF_WEAK(vwarnx);

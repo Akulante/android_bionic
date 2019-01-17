@@ -15,16 +15,20 @@
  */
 
 #include <gtest/gtest.h>
+
 #include "BionicDeathTest.h"
+#include "math_data_test.h"
 #include "TemporaryFile.h"
+#include "utils.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -134,15 +138,48 @@ TEST(stdlib, mrand48) {
   EXPECT_EQ(795539493, mrand48());
 }
 
-TEST(stdlib, posix_memalign) {
-  void* p;
+TEST(stdlib, posix_memalign_sweep) {
+  void* ptr;
 
-  ASSERT_EQ(0, posix_memalign(&p, 512, 128));
-  ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(p) % 512);
-  free(p);
+  // These should all fail.
+  for (size_t align = 0; align < sizeof(long); align++) {
+    ASSERT_EQ(EINVAL, posix_memalign(&ptr, align, 256))
+        << "Unexpected value at align " << align;
+  }
 
-  // Can't align to a non-power of 2.
-  ASSERT_EQ(EINVAL, posix_memalign(&p, 81, 128));
+  // Verify powers of 2 up to 2048 allocate, and verify that all other
+  // alignment values between the powers of 2 fail.
+  size_t last_align = sizeof(long);
+  for (size_t align = sizeof(long); align <= 2048; align <<= 1) {
+    // Try all of the non power of 2 values from the last until this value.
+    for (size_t fail_align = last_align + 1; fail_align < align; fail_align++) {
+      ASSERT_EQ(EINVAL, posix_memalign(&ptr, fail_align, 256))
+          << "Unexpected success at align " << fail_align;
+    }
+    ASSERT_EQ(0, posix_memalign(&ptr, align, 256))
+        << "Unexpected failure at align " << align;
+    ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr) & (align - 1))
+        << "Did not return a valid aligned ptr " << ptr << " expected alignment " << align;
+    free(ptr);
+    last_align = align;
+  }
+}
+
+TEST(stdlib, posix_memalign_various_sizes) {
+  std::vector<size_t> sizes{1, 4, 8, 256, 1024, 65000, 128000, 256000, 1000000};
+  for (auto size : sizes) {
+    void* ptr;
+    ASSERT_EQ(0, posix_memalign(&ptr, 16, 1))
+        << "posix_memalign failed at size " << size;
+    ASSERT_EQ(0U, reinterpret_cast<uintptr_t>(ptr) & 0xf)
+        << "Pointer not aligned at size " << size << " ptr " << ptr;
+    free(ptr);
+  }
+}
+
+TEST(stdlib, posix_memalign_overflow) {
+  void* ptr;
+  ASSERT_NE(0, posix_memalign(&ptr, 16, SIZE_MAX));
 }
 
 TEST(stdlib, realpath__NULL_filename) {
@@ -286,16 +323,69 @@ TEST(stdlib, atof) {
   ASSERT_DOUBLE_EQ(1.23, atof("1.23"));
 }
 
+template <typename T>
+static void CheckStrToFloat(T fn(const char* s, char** end)) {
+  FpUlpEq<0, T> pred;
+
+  EXPECT_PRED_FORMAT2(pred, 9.0, fn("9.0", nullptr));
+  EXPECT_PRED_FORMAT2(pred, 9.0, fn("0.9e1", nullptr));
+  EXPECT_PRED_FORMAT2(pred, 9.0, fn("0x1.2p3", nullptr));
+
+  const char* s = " \t\v\f\r\n9.0";
+  char* p;
+  EXPECT_PRED_FORMAT2(pred, 9.0, fn(s, &p));
+  EXPECT_EQ(s + strlen(s), p);
+
+  EXPECT_TRUE(isnan(fn("+nan", nullptr)));
+  EXPECT_TRUE(isnan(fn("nan", nullptr)));
+  EXPECT_TRUE(isnan(fn("-nan", nullptr)));
+
+  EXPECT_TRUE(isnan(fn("+nan(0xff)", nullptr)));
+  EXPECT_TRUE(isnan(fn("nan(0xff)", nullptr)));
+  EXPECT_TRUE(isnan(fn("-nan(0xff)", nullptr)));
+
+  EXPECT_TRUE(isnan(fn("+nanny", &p)));
+  EXPECT_STREQ("ny", p);
+  EXPECT_TRUE(isnan(fn("nanny", &p)));
+  EXPECT_STREQ("ny", p);
+  EXPECT_TRUE(isnan(fn("-nanny", &p)));
+  EXPECT_STREQ("ny", p);
+
+  EXPECT_EQ(0, fn("muppet", &p));
+  EXPECT_STREQ("muppet", p);
+  EXPECT_EQ(0, fn("  muppet", &p));
+  EXPECT_STREQ("  muppet", p);
+
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("+inf", nullptr));
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("inf", nullptr));
+  EXPECT_EQ(-std::numeric_limits<T>::infinity(), fn("-inf", nullptr));
+
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("+infinity", nullptr));
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("infinity", nullptr));
+  EXPECT_EQ(-std::numeric_limits<T>::infinity(), fn("-infinity", nullptr));
+
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("+infinitude", &p));
+  EXPECT_STREQ("initude", p);
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("infinitude", &p));
+  EXPECT_STREQ("initude", p);
+  EXPECT_EQ(-std::numeric_limits<T>::infinity(), fn("-infinitude", &p));
+  EXPECT_STREQ("initude", p);
+
+  // Check case-insensitivity.
+  EXPECT_EQ(std::numeric_limits<T>::infinity(), fn("InFiNiTy", nullptr));
+  EXPECT_TRUE(isnan(fn("NaN", nullptr)));
+}
+
 TEST(stdlib, strtod) {
-  ASSERT_DOUBLE_EQ(1.23, strtod("1.23", NULL));
+  CheckStrToFloat(strtod);
 }
 
 TEST(stdlib, strtof) {
-  ASSERT_FLOAT_EQ(1.23, strtof("1.23", NULL));
+  CheckStrToFloat(strtof);
 }
 
 TEST(stdlib, strtold) {
-  ASSERT_DOUBLE_EQ(1.23, strtold("1.23", NULL));
+  CheckStrToFloat(strtold);
 }
 
 TEST(stdlib, strtof_2206701) {
@@ -323,10 +413,7 @@ TEST(stdlib, quick_exit) {
     quick_exit(99);
   }
 
-  int status;
-  ASSERT_EQ(pid, waitpid(pid, &status, 0));
-  ASSERT_TRUE(WIFEXITED(status));
-  ASSERT_EQ(99, WEXITSTATUS(status));
+  AssertChildExited(pid, 99);
 }
 
 static int quick_exit_status = 0;
@@ -355,24 +442,18 @@ TEST(stdlib, at_quick_exit) {
     quick_exit(99);
   }
 
-  int status;
-  ASSERT_EQ(pid, waitpid(pid, &status, 0));
-  ASSERT_TRUE(WIFEXITED(status));
-  ASSERT_EQ(99, WEXITSTATUS(status));
+  AssertChildExited(pid, 99);
 }
 
 TEST(unistd, _Exit) {
-  int pid = fork();
+  pid_t pid = fork();
   ASSERT_NE(-1, pid) << strerror(errno);
 
   if (pid == 0) {
     _Exit(99);
   }
 
-  int status;
-  ASSERT_EQ(pid, waitpid(pid, &status, 0));
-  ASSERT_TRUE(WIFEXITED(status));
-  ASSERT_EQ(99, WEXITSTATUS(status));
+  AssertChildExited(pid, 99);
 }
 
 TEST(stdlib, pty_smoke) {
@@ -520,4 +601,50 @@ TEST(stdlib, strtoull_EINVAL) {
   errno = 0;
   strtoull("123", NULL, 37);
   ASSERT_EQ(EINVAL, errno);
+}
+
+TEST(stdlib, getsubopt) {
+  char* const tokens[] = {
+    const_cast<char*>("a"),
+    const_cast<char*>("b"),
+    const_cast<char*>("foo"),
+    nullptr
+  };
+  std::string input = "a,b,foo=bar,a,unknown";
+  char* subopts = &input[0];
+  char* value = nullptr;
+
+  ASSERT_EQ(0, getsubopt(&subopts, tokens, &value));
+  ASSERT_EQ(nullptr, value);
+  ASSERT_EQ(1, getsubopt(&subopts, tokens, &value));
+  ASSERT_EQ(nullptr, value);
+  ASSERT_EQ(2, getsubopt(&subopts, tokens, &value));
+  ASSERT_STREQ("bar", value);
+  ASSERT_EQ(0, getsubopt(&subopts, tokens, &value));
+  ASSERT_EQ(nullptr, value);
+
+  ASSERT_EQ(-1, getsubopt(&subopts, tokens, &value));
+}
+
+TEST(stdlib, mblen) {
+  // "If s is a null pointer, mblen() shall return a non-zero or 0 value, if character encodings,
+  // respectively, do or do not have state-dependent encodings." We're always UTF-8.
+  EXPECT_EQ(0, mblen(nullptr, 1));
+
+  ASSERT_STREQ("C.UTF-8", setlocale(LC_ALL, "C.UTF-8"));
+
+  // 1-byte UTF-8.
+  EXPECT_EQ(1, mblen("abcdef", 6));
+  // 2-byte UTF-8.
+  EXPECT_EQ(2, mblen("\xc2\xa2" "cdef", 6));
+  // 3-byte UTF-8.
+  EXPECT_EQ(3, mblen("\xe2\x82\xac" "def", 6));
+  // 4-byte UTF-8.
+  EXPECT_EQ(4, mblen("\xf0\xa4\xad\xa2" "ef", 6));
+
+  // Illegal over-long sequence.
+  ASSERT_EQ(-1, mblen("\xf0\x82\x82\xac" "ef", 6));
+
+  // "mblen() shall ... return 0 (if s points to the null byte)".
+  EXPECT_EQ(0, mblen("", 1));
 }

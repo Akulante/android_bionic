@@ -12,8 +12,9 @@
 #include <signal.h>
 #include <stdio.h>
 
+#include <async_safe/log.h>
+
 #include "private/ErrnoRestorer.h"
-#include "private/libc_logging.h"
 
 struct Pair {
   int code;
@@ -31,7 +32,7 @@ static const char* __code_string_lookup(const Pair* strings, int code) {
 
 static const Pair _sys_error_strings[] = {
 #define  __BIONIC_ERRDEF(x,y,z)  { x, z },
-#include <sys/_errdefs.h>
+#include "private/bionic_errdefs.h"
   { 0, NULL }
 };
 
@@ -41,7 +42,7 @@ extern "C" __LIBC_HIDDEN__ const char* __strerror_lookup(int error_number) {
 
 static const Pair _sys_signal_strings[] = {
 #define  __BIONIC_SIGDEF(signal_number, signal_description)  { signal_number, signal_description },
-#include <sys/_sigdefs.h>
+#include "private/bionic_sigdefs.h"
   { 0, NULL }
 };
 
@@ -57,7 +58,7 @@ int strerror_r(int error_number, char* buf, size_t buf_len) {
   if (error_name != NULL) {
     length = strlcpy(buf, error_name, buf_len);
   } else {
-    length = __libc_format_buffer(buf, buf_len, "Unknown error %d", error_number);
+    length = async_safe_format_buffer(buf, buf_len, "Unknown error %d", error_number);
   }
   if (length >= buf_len) {
     errno_restorer.override(ERANGE);

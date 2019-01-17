@@ -36,7 +36,13 @@
 #include <unistd.h>
 
 #include "linker.h"
+#include "linker_dlwarning.h"
+#include "linker_globals.h"
 #include "linker_debug.h"
+#include "linker_utils.h"
+
+#include "private/bionic_prctl.h"
+#include "private/CFIShadow.h" // For kLibraryAlignment
 
 static int GetTargetElfMachine() {
 #if defined(__arm__)
@@ -133,46 +139,81 @@ static int GetTargetElfMachine() {
                                       MAYBE_MAP_FLAG((x), PF_R, PROT_READ) | \
                                       MAYBE_MAP_FLAG((x), PF_W, PROT_WRITE))
 
-ElfReader::ElfReader(const char* name, int fd, off64_t file_offset, off64_t file_size)
-    : name_(name), fd_(fd), file_offset_(file_offset), file_size_(file_size),
-      phdr_num_(0), phdr_mmap_(nullptr), phdr_table_(nullptr), phdr_size_(0),
-      load_start_(nullptr), load_size_(0), load_bias_(0),
-      loaded_phdr_(nullptr) {
+ElfReader::ElfReader()
+    : did_read_(false), did_load_(false), fd_(-1), file_offset_(0), file_size_(0), phdr_num_(0),
+      phdr_table_(nullptr), shdr_table_(nullptr), shdr_num_(0), dynamic_(nullptr), strtab_(nullptr),
+      strtab_size_(0), load_start_(nullptr), load_size_(0), load_bias_(0), loaded_phdr_(nullptr),
+      mapped_by_caller_(false) {
 }
 
-ElfReader::~ElfReader() {
-  if (phdr_mmap_ != nullptr) {
-    munmap(phdr_mmap_, phdr_size_);
+bool ElfReader::Read(const char* name, int fd, off64_t file_offset, off64_t file_size) {
+  if (did_read_) {
+    return true;
   }
+  name_ = name;
+  fd_ = fd;
+  file_offset_ = file_offset;
+  file_size_ = file_size;
+
+  if (ReadElfHeader() &&
+      VerifyElfHeader() &&
+      ReadProgramHeaders() &&
+      ReadSectionHeaders() &&
+      ReadDynamicSection()) {
+    did_read_ = true;
+  }
+
+  return did_read_;
 }
 
 bool ElfReader::Load(const android_dlextinfo* extinfo) {
-  return ReadElfHeader() &&
-         VerifyElfHeader() &&
-         ReadProgramHeader() &&
-         ReserveAddressSpace(extinfo) &&
-         LoadSegments() &&
-         FindPhdr();
+  CHECK(did_read_);
+  if (did_load_) {
+    return true;
+  }
+  if (ReserveAddressSpace(extinfo) &&
+      LoadSegments() &&
+      FindPhdr()) {
+    did_load_ = true;
+  }
+
+  return did_load_;
+}
+
+const char* ElfReader::get_string(ElfW(Word) index) const {
+  CHECK(strtab_ != nullptr);
+  CHECK(index < strtab_size_);
+
+  return strtab_ + index;
 }
 
 bool ElfReader::ReadElfHeader() {
   ssize_t rc = TEMP_FAILURE_RETRY(pread64(fd_, &header_, sizeof(header_), file_offset_));
   if (rc < 0) {
-    DL_ERR("can't read file \"%s\": %s", name_, strerror(errno));
+    DL_ERR("can't read file \"%s\": %s", name_.c_str(), strerror(errno));
     return false;
   }
 
   if (rc != sizeof(header_)) {
-    DL_ERR("\"%s\" is too small to be an ELF executable: only found %zd bytes", name_,
+    DL_ERR("\"%s\" is too small to be an ELF executable: only found %zd bytes", name_.c_str(),
            static_cast<size_t>(rc));
     return false;
   }
   return true;
 }
 
+static const char* EM_to_string(int em) {
+  if (em == EM_386) return "EM_386";
+  if (em == EM_AARCH64) return "EM_AARCH64";
+  if (em == EM_ARM) return "EM_ARM";
+  if (em == EM_MIPS) return "EM_MIPS";
+  if (em == EM_X86_64) return "EM_X86_64";
+  return "EM_???";
+}
+
 bool ElfReader::VerifyElfHeader() {
   if (memcmp(header_.e_ident, ELFMAG, SELFMAG) != 0) {
-    DL_ERR("\"%s\" has bad ELF magic", name_);
+    DL_ERR("\"%s\" has bad ELF magic", name_.c_str());
     return false;
   }
 
@@ -182,73 +223,243 @@ bool ElfReader::VerifyElfHeader() {
 #if defined(__LP64__)
   if (elf_class != ELFCLASS64) {
     if (elf_class == ELFCLASS32) {
-      DL_ERR("\"%s\" is 32-bit instead of 64-bit", name_);
+      DL_ERR("\"%s\" is 32-bit instead of 64-bit", name_.c_str());
     } else {
-      DL_ERR("\"%s\" has unknown ELF class: %d", name_, elf_class);
+      DL_ERR("\"%s\" has unknown ELF class: %d", name_.c_str(), elf_class);
     }
     return false;
   }
 #else
   if (elf_class != ELFCLASS32) {
     if (elf_class == ELFCLASS64) {
-      DL_ERR("\"%s\" is 64-bit instead of 32-bit", name_);
+      DL_ERR("\"%s\" is 64-bit instead of 32-bit", name_.c_str());
     } else {
-      DL_ERR("\"%s\" has unknown ELF class: %d", name_, elf_class);
+      DL_ERR("\"%s\" has unknown ELF class: %d", name_.c_str(), elf_class);
     }
     return false;
   }
 #endif
 
   if (header_.e_ident[EI_DATA] != ELFDATA2LSB) {
-    DL_ERR("\"%s\" not little-endian: %d", name_, header_.e_ident[EI_DATA]);
+    DL_ERR("\"%s\" not little-endian: %d", name_.c_str(), header_.e_ident[EI_DATA]);
     return false;
   }
 
   if (header_.e_type != ET_DYN) {
-    DL_ERR("\"%s\" has unexpected e_type: %d", name_, header_.e_type);
+    DL_ERR("\"%s\" has unexpected e_type: %d", name_.c_str(), header_.e_type);
     return false;
   }
 
   if (header_.e_version != EV_CURRENT) {
-    DL_ERR("\"%s\" has unexpected e_version: %d", name_, header_.e_version);
+    DL_ERR("\"%s\" has unexpected e_version: %d", name_.c_str(), header_.e_version);
     return false;
   }
 
   if (header_.e_machine != GetTargetElfMachine()) {
-    DL_ERR("\"%s\" has unexpected e_machine: %d", name_, header_.e_machine);
+    DL_ERR("\"%s\" has unexpected e_machine: %d (%s)", name_.c_str(), header_.e_machine,
+           EM_to_string(header_.e_machine));
     return false;
+  }
+
+  if (header_.e_shentsize != sizeof(ElfW(Shdr))) {
+    // Fail if app is targeting Android O or above
+    if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
+      DL_ERR_AND_LOG("\"%s\" has unsupported e_shentsize: 0x%x (expected 0x%zx)",
+                     name_.c_str(), header_.e_shentsize, sizeof(ElfW(Shdr)));
+      return false;
+    }
+    DL_WARN("\"%s\" has unsupported e_shentsize: 0x%x (expected 0x%zx)",
+            name_.c_str(), header_.e_shentsize, sizeof(ElfW(Shdr)));
+    add_dlwarning(name_.c_str(), "has invalid ELF header");
+  }
+
+  if (header_.e_shstrndx == 0) {
+    // Fail if app is targeting Android O or above
+    if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
+      DL_ERR_AND_LOG("\"%s\" has invalid e_shstrndx", name_.c_str());
+      return false;
+    }
+
+    DL_WARN("\"%s\" has invalid e_shstrndx", name_.c_str());
+    add_dlwarning(name_.c_str(), "has invalid ELF header");
   }
 
   return true;
 }
 
+bool ElfReader::CheckFileRange(ElfW(Addr) offset, size_t size, size_t alignment) {
+  off64_t range_start;
+  off64_t range_end;
+
+  // Only header can be located at the 0 offset... This function called to
+  // check DYNSYM and DYNAMIC sections and phdr/shdr - none of them can be
+  // at offset 0.
+
+  return offset > 0 &&
+         safe_add(&range_start, file_offset_, offset) &&
+         safe_add(&range_end, range_start, size) &&
+         (range_start < file_size_) &&
+         (range_end <= file_size_) &&
+         ((offset % alignment) == 0);
+}
+
 // Loads the program header table from an ELF file into a read-only private
 // anonymous mmap-ed block.
-bool ElfReader::ReadProgramHeader() {
+bool ElfReader::ReadProgramHeaders() {
   phdr_num_ = header_.e_phnum;
 
   // Like the kernel, we only accept program header tables that
   // are smaller than 64KiB.
   if (phdr_num_ < 1 || phdr_num_ > 65536/sizeof(ElfW(Phdr))) {
-    DL_ERR("\"%s\" has invalid e_phnum: %zd", name_, phdr_num_);
+    DL_ERR("\"%s\" has invalid e_phnum: %zd", name_.c_str(), phdr_num_);
     return false;
   }
 
-  ElfW(Addr) page_min = PAGE_START(header_.e_phoff);
-  ElfW(Addr) page_max = PAGE_END(header_.e_phoff + (phdr_num_ * sizeof(ElfW(Phdr))));
-  ElfW(Addr) page_offset = PAGE_OFFSET(header_.e_phoff);
-
-  phdr_size_ = page_max - page_min;
-
-  void* mmap_result =
-      mmap64(nullptr, phdr_size_, PROT_READ, MAP_PRIVATE, fd_, file_offset_ + page_min);
-  if (mmap_result == MAP_FAILED) {
-    DL_ERR("\"%s\" phdr mmap failed: %s", name_, strerror(errno));
+  // Boundary checks
+  size_t size = phdr_num_ * sizeof(ElfW(Phdr));
+  if (!CheckFileRange(header_.e_phoff, size, alignof(ElfW(Phdr)))) {
+    DL_ERR_AND_LOG("\"%s\" has invalid phdr offset/size: %zu/%zu",
+                   name_.c_str(),
+                   static_cast<size_t>(header_.e_phoff),
+                   size);
     return false;
   }
 
-  phdr_mmap_ = mmap_result;
-  phdr_table_ = reinterpret_cast<ElfW(Phdr)*>(reinterpret_cast<char*>(mmap_result) + page_offset);
+  if (!phdr_fragment_.Map(fd_, file_offset_, header_.e_phoff, size)) {
+    DL_ERR("\"%s\" phdr mmap failed: %s", name_.c_str(), strerror(errno));
+    return false;
+  }
+
+  phdr_table_ = static_cast<ElfW(Phdr)*>(phdr_fragment_.data());
+  return true;
+}
+
+bool ElfReader::ReadSectionHeaders() {
+  shdr_num_ = header_.e_shnum;
+
+  if (shdr_num_ == 0) {
+    DL_ERR_AND_LOG("\"%s\" has no section headers", name_.c_str());
+    return false;
+  }
+
+  size_t size = shdr_num_ * sizeof(ElfW(Shdr));
+  if (!CheckFileRange(header_.e_shoff, size, alignof(const ElfW(Shdr)))) {
+    DL_ERR_AND_LOG("\"%s\" has invalid shdr offset/size: %zu/%zu",
+                   name_.c_str(),
+                   static_cast<size_t>(header_.e_shoff),
+                   size);
+    return false;
+  }
+
+  if (!shdr_fragment_.Map(fd_, file_offset_, header_.e_shoff, size)) {
+    DL_ERR("\"%s\" shdr mmap failed: %s", name_.c_str(), strerror(errno));
+    return false;
+  }
+
+  shdr_table_ = static_cast<const ElfW(Shdr)*>(shdr_fragment_.data());
+  return true;
+}
+
+bool ElfReader::ReadDynamicSection() {
+  // 1. Find .dynamic section (in section headers)
+  const ElfW(Shdr)* dynamic_shdr = nullptr;
+  for (size_t i = 0; i < shdr_num_; ++i) {
+    if (shdr_table_[i].sh_type == SHT_DYNAMIC) {
+      dynamic_shdr = &shdr_table_ [i];
+      break;
+    }
+  }
+
+  if (dynamic_shdr == nullptr) {
+    DL_ERR_AND_LOG("\"%s\" .dynamic section header was not found", name_.c_str());
+    return false;
+  }
+
+  // Make sure dynamic_shdr offset and size matches PT_DYNAMIC phdr
+  size_t pt_dynamic_offset = 0;
+  size_t pt_dynamic_filesz = 0;
+  for (size_t i = 0; i < phdr_num_; ++i) {
+    const ElfW(Phdr)* phdr = &phdr_table_[i];
+    if (phdr->p_type == PT_DYNAMIC) {
+      pt_dynamic_offset = phdr->p_offset;
+      pt_dynamic_filesz = phdr->p_filesz;
+    }
+  }
+
+  if (pt_dynamic_offset != dynamic_shdr->sh_offset) {
+    if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
+      DL_ERR_AND_LOG("\"%s\" .dynamic section has invalid offset: 0x%zx, "
+                     "expected to match PT_DYNAMIC offset: 0x%zx",
+                     name_.c_str(),
+                     static_cast<size_t>(dynamic_shdr->sh_offset),
+                     pt_dynamic_offset);
+      return false;
+    }
+    DL_WARN("\"%s\" .dynamic section has invalid offset: 0x%zx, "
+            "expected to match PT_DYNAMIC offset: 0x%zx",
+            name_.c_str(),
+            static_cast<size_t>(dynamic_shdr->sh_offset),
+            pt_dynamic_offset);
+    add_dlwarning(name_.c_str(), "invalid .dynamic section");
+  }
+
+  if (pt_dynamic_filesz != dynamic_shdr->sh_size) {
+    if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
+      DL_ERR_AND_LOG("\"%s\" .dynamic section has invalid size: 0x%zx, "
+                     "expected to match PT_DYNAMIC filesz: 0x%zx",
+                     name_.c_str(),
+                     static_cast<size_t>(dynamic_shdr->sh_size),
+                     pt_dynamic_filesz);
+      return false;
+    }
+    DL_WARN("\"%s\" .dynamic section has invalid size: 0x%zx, "
+            "expected to match PT_DYNAMIC filesz: 0x%zx",
+            name_.c_str(),
+            static_cast<size_t>(dynamic_shdr->sh_size),
+            pt_dynamic_filesz);
+    add_dlwarning(name_.c_str(), "invalid .dynamic section");
+  }
+
+  if (dynamic_shdr->sh_link >= shdr_num_) {
+    DL_ERR_AND_LOG("\"%s\" .dynamic section has invalid sh_link: %d",
+                   name_.c_str(),
+                   dynamic_shdr->sh_link);
+    return false;
+  }
+
+  const ElfW(Shdr)* strtab_shdr = &shdr_table_[dynamic_shdr->sh_link];
+
+  if (strtab_shdr->sh_type != SHT_STRTAB) {
+    DL_ERR_AND_LOG("\"%s\" .dynamic section has invalid link(%d) sh_type: %d (expected SHT_STRTAB)",
+                   name_.c_str(), dynamic_shdr->sh_link, strtab_shdr->sh_type);
+    return false;
+  }
+
+  if (!CheckFileRange(dynamic_shdr->sh_offset, dynamic_shdr->sh_size, alignof(const ElfW(Dyn)))) {
+    DL_ERR_AND_LOG("\"%s\" has invalid offset/size of .dynamic section", name_.c_str());
+    return false;
+  }
+
+  if (!dynamic_fragment_.Map(fd_, file_offset_, dynamic_shdr->sh_offset, dynamic_shdr->sh_size)) {
+    DL_ERR("\"%s\" dynamic section mmap failed: %s", name_.c_str(), strerror(errno));
+    return false;
+  }
+
+  dynamic_ = static_cast<const ElfW(Dyn)*>(dynamic_fragment_.data());
+
+  if (!CheckFileRange(strtab_shdr->sh_offset, strtab_shdr->sh_size, alignof(const char))) {
+    DL_ERR_AND_LOG("\"%s\" has invalid offset/size of the .strtab section linked from .dynamic section",
+                   name_.c_str());
+    return false;
+  }
+
+  if (!strtab_fragment_.Map(fd_, file_offset_, strtab_shdr->sh_offset, strtab_shdr->sh_size)) {
+    DL_ERR("\"%s\" strtab section mmap failed: %s", name_.c_str(), strerror(errno));
+    return false;
+  }
+
+  strtab_ = static_cast<const char*>(strtab_fragment_.data());
+  strtab_size_ = strtab_fragment_.size();
   return true;
 }
 
@@ -301,6 +512,40 @@ size_t phdr_table_get_load_size(const ElfW(Phdr)* phdr_table, size_t phdr_count,
   return max_vaddr - min_vaddr;
 }
 
+// Reserve a virtual address range such that if it's limits were extended to the next 2**align
+// boundary, it would not overlap with any existing mappings.
+static void* ReserveAligned(void* hint, size_t size, size_t align) {
+  int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  // Address hint is only used in Art for the image mapping, and it is pretty important. Don't mess
+  // with it.
+  // FIXME: try an aligned allocation and fall back to plain mmap() if the former does not provide a
+  // mapping at the requested address?
+  if (align == PAGE_SIZE || hint != nullptr) {
+    void* mmap_ptr = mmap(hint, size, PROT_NONE, mmap_flags, -1, 0);
+    if (mmap_ptr == MAP_FAILED) {
+      return nullptr;
+    }
+    return mmap_ptr;
+  }
+
+  // Allocate enough space so that the end of the desired region aligned up is still inside the
+  // mapping.
+  size_t mmap_size = align_up(size, align) + align - PAGE_SIZE;
+  uint8_t* mmap_ptr =
+      reinterpret_cast<uint8_t*>(mmap(nullptr, mmap_size, PROT_NONE, mmap_flags, -1, 0));
+  if (mmap_ptr == MAP_FAILED) {
+    return nullptr;
+  }
+
+  uint8_t* first = align_up(mmap_ptr, align);
+  uint8_t* last = align_down(mmap_ptr + mmap_size, align) - size;
+  size_t n = arc4random_uniform((last - first) / PAGE_SIZE + 1);
+  uint8_t* start = first + n * PAGE_SIZE;
+  munmap(mmap_ptr, start - mmap_ptr);
+  munmap(start + size, mmap_ptr + mmap_size - (start + size));
+  return start;
+}
+
 // Reserve a virtual address range big enough to hold all loadable
 // segments of a program header table. This is done by creating a
 // private anonymous mmap() with PROT_NONE.
@@ -308,7 +553,7 @@ bool ElfReader::ReserveAddressSpace(const android_dlextinfo* extinfo) {
   ElfW(Addr) min_vaddr;
   load_size_ = phdr_table_get_load_size(phdr_table_, phdr_num_, &min_vaddr);
   if (load_size_ == 0) {
-    DL_ERR("\"%s\" has no loadable segments", name_);
+    DL_ERR("\"%s\" has no loadable segments", name_.c_str());
     return false;
   }
 
@@ -316,8 +561,9 @@ bool ElfReader::ReserveAddressSpace(const android_dlextinfo* extinfo) {
   void* start;
   size_t reserved_size = 0;
   bool reserved_hint = true;
+  bool strict_hint = false;
   // Assume position independent executable by default.
-  uint8_t* mmap_hint = nullptr;
+  void* mmap_hint = nullptr;
 
   if (extinfo != nullptr) {
     if (extinfo->flags & ANDROID_DLEXT_RESERVED_ADDRESS) {
@@ -327,25 +573,34 @@ bool ElfReader::ReserveAddressSpace(const android_dlextinfo* extinfo) {
       reserved_size = extinfo->reserved_size;
     }
 
-    if ((extinfo->flags & ANDROID_DLEXT_FORCE_FIXED_VADDR) != 0) {
+    if (addr != nullptr && (extinfo->flags & ANDROID_DLEXT_FORCE_FIXED_VADDR) != 0) {
       mmap_hint = addr;
+    } else if ((extinfo->flags & ANDROID_DLEXT_LOAD_AT_FIXED_ADDRESS) != 0) {
+      mmap_hint = extinfo->reserved_addr;
+      strict_hint = true;
     }
   }
 
   if (load_size_ > reserved_size) {
     if (!reserved_hint) {
       DL_ERR("reserved address space %zd smaller than %zd bytes needed for \"%s\"",
-             reserved_size - load_size_, load_size_, name_);
+             reserved_size - load_size_, load_size_, name_.c_str());
       return false;
     }
-    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    start = mmap(mmap_hint, load_size_, PROT_NONE, mmap_flags, -1, 0);
-    if (start == MAP_FAILED) {
-      DL_ERR("couldn't reserve %zd bytes of address space for \"%s\"", load_size_, name_);
+    start = ReserveAligned(mmap_hint, load_size_, kLibraryAlignment);
+    if (start == nullptr) {
+      DL_ERR("couldn't reserve %zd bytes of address space for \"%s\"", load_size_, name_.c_str());
+      return false;
+    }
+    if (strict_hint && (start != mmap_hint)) {
+      munmap(start, load_size_);
+      DL_ERR("couldn't reserve %zd bytes of address space at %p for \"%s\"",
+             load_size_, mmap_hint, name_.c_str());
       return false;
     }
   } else {
     start = extinfo->reserved_addr;
+    mapped_by_caller_ = true;
   }
 
   load_start_ = start;
@@ -378,28 +633,39 @@ bool ElfReader::LoadSegments() {
     ElfW(Addr) file_length = file_end - file_page_start;
 
     if (file_size_ <= 0) {
-      DL_ERR("\"%s\" invalid file size: %" PRId64, name_, file_size_);
+      DL_ERR("\"%s\" invalid file size: %" PRId64, name_.c_str(), file_size_);
       return false;
     }
 
-    if (file_end >= static_cast<size_t>(file_size_)) {
+    if (file_end > static_cast<size_t>(file_size_)) {
       DL_ERR("invalid ELF file \"%s\" load segment[%zd]:"
           " p_offset (%p) + p_filesz (%p) ( = %p) past end of file (0x%" PRIx64 ")",
-          name_, i, reinterpret_cast<void*>(phdr->p_offset),
+          name_.c_str(), i, reinterpret_cast<void*>(phdr->p_offset),
           reinterpret_cast<void*>(phdr->p_filesz),
           reinterpret_cast<void*>(file_end), file_size_);
       return false;
     }
 
     if (file_length != 0) {
+      int prot = PFLAGS_TO_PROT(phdr->p_flags);
+      if ((prot & (PROT_EXEC | PROT_WRITE)) == (PROT_EXEC | PROT_WRITE)) {
+        // W + E PT_LOAD segments are not allowed in O.
+        if (get_application_target_sdk_version() >= __ANDROID_API_O__) {
+          DL_ERR_AND_LOG("\"%s\": W + E load segments are not allowed", name_.c_str());
+          return false;
+        }
+        DL_WARN("\"%s\": W + E load segments are not allowed", name_.c_str());
+        add_dlwarning(name_.c_str(), "W+E load segments");
+      }
+
       void* seg_addr = mmap64(reinterpret_cast<void*>(seg_page_start),
                             file_length,
-                            PFLAGS_TO_PROT(phdr->p_flags),
+                            prot,
                             MAP_FIXED|MAP_PRIVATE,
                             fd_,
                             file_offset_ + file_page_start);
       if (seg_addr == MAP_FAILED) {
-        DL_ERR("couldn't map \"%s\" segment %zd: %s", name_, i, strerror(errno));
+        DL_ERR("couldn't map \"%s\" segment %zd: %s", name_.c_str(), i, strerror(errno));
         return false;
       }
     }
@@ -417,16 +683,19 @@ bool ElfReader::LoadSegments() {
     // between them. This is done by using a private anonymous
     // map for all extra pages.
     if (seg_page_end > seg_file_end) {
+      size_t zeromap_size = seg_page_end - seg_file_end;
       void* zeromap = mmap(reinterpret_cast<void*>(seg_file_end),
-                           seg_page_end - seg_file_end,
+                           zeromap_size,
                            PFLAGS_TO_PROT(phdr->p_flags),
                            MAP_FIXED|MAP_ANONYMOUS|MAP_PRIVATE,
                            -1,
                            0);
       if (zeromap == MAP_FAILED) {
-        DL_ERR("couldn't zero fill \"%s\" gap: %s", name_, strerror(errno));
+        DL_ERR("couldn't zero fill \"%s\" gap: %s", name_.c_str(), strerror(errno));
         return false;
       }
+
+      prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, zeromap, zeromap_size, ".bss");
     }
   }
   return true;
@@ -771,6 +1040,26 @@ void phdr_table_get_dynamic_section(const ElfW(Phdr)* phdr_table, size_t phdr_co
   }
 }
 
+/* Return the program interpreter string, or nullptr if missing.
+ *
+ * Input:
+ *   phdr_table  -> program header table
+ *   phdr_count  -> number of entries in tables
+ *   load_bias   -> load bias
+ * Return:
+ *   pointer to the program interpreter string.
+ */
+const char* phdr_table_get_interpreter_name(const ElfW(Phdr) * phdr_table, size_t phdr_count,
+                                            ElfW(Addr) load_bias) {
+  for (size_t i = 0; i<phdr_count; ++i) {
+    const ElfW(Phdr)& phdr = phdr_table[i];
+    if (phdr.p_type == PT_INTERP) {
+      return reinterpret_cast<const char*>(load_bias + phdr.p_vaddr);
+    }
+  }
+  return nullptr;
+}
+
 // Sets loaded_phdr_ to the address of the program header table as it appears
 // in the loaded segments in memory. This is in contrast with phdr_table_,
 // which is temporary and will be released before the library is relocated.
@@ -799,7 +1088,7 @@ bool ElfReader::FindPhdr() {
     }
   }
 
-  DL_ERR("can't find loaded phdr for \"%s\"", name_);
+  DL_ERR("can't find loaded phdr for \"%s\"", name_.c_str());
   return false;
 }
 
@@ -809,7 +1098,7 @@ bool ElfReader::FindPhdr() {
 bool ElfReader::CheckPhdr(ElfW(Addr) loaded) {
   const ElfW(Phdr)* phdr_limit = phdr_table_ + phdr_num_;
   ElfW(Addr) loaded_end = loaded + (phdr_num_ * sizeof(ElfW(Phdr)));
-  for (ElfW(Phdr)* phdr = phdr_table_; phdr < phdr_limit; ++phdr) {
+  for (const ElfW(Phdr)* phdr = phdr_table_; phdr < phdr_limit; ++phdr) {
     if (phdr->p_type != PT_LOAD) {
       continue;
     }
@@ -820,6 +1109,7 @@ bool ElfReader::CheckPhdr(ElfW(Addr) loaded) {
       return true;
     }
   }
-  DL_ERR("\"%s\" loaded phdr %p not in loadable segment", name_, reinterpret_cast<void*>(loaded));
+  DL_ERR("\"%s\" loaded phdr %p not in loadable segment",
+         name_.c_str(), reinterpret_cast<void*>(loaded));
   return false;
 }

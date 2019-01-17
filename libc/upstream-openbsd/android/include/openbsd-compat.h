@@ -22,6 +22,11 @@
 #include <sys/cdefs.h>
 #include <stddef.h> // For size_t.
 
+#define __BEGIN_HIDDEN_DECLS _Pragma("GCC visibility push(hidden)")
+#define __END_HIDDEN_DECLS _Pragma("GCC visibility pop")
+
+extern const char* __progname;
+
 /* Redirect internal C library calls to the public function. */
 #define _err err
 #define _errx errx
@@ -32,8 +37,9 @@
 #define _warn warn
 #define _warnx warnx
 
-/* Ignore all __weak_alias in OpenBSD. */
-#define __weak_alias(alias,sym)
+/* Ignore all DEF_STRONG/DEF_WEAK in OpenBSD. */
+#define DEF_STRONG(sym)
+#define DEF_WEAK(sym)
 
 /* Ignore all __warn_references in OpenBSD. */
 #define __warn_references(sym,msg)
@@ -64,6 +70,10 @@
  */
 #define _PATH_TMP "/data/local/tmp/"
 
+/* Use appropriate shell depending on process's executable. */
+__LIBC_HIDDEN__ extern const char* __bionic_get_shell_path();
+#define _PATH_BSHELL __bionic_get_shell_path()
+
 /* We have OpenBSD's getentropy_linux.c, but we don't mention getentropy in any header. */
 __LIBC_HIDDEN__ extern int getentropy(void*, size_t);
 
@@ -71,16 +81,13 @@ __LIBC_HIDDEN__ extern int getentropy(void*, size_t);
 __LIBC_HIDDEN__ void* reallocarray(void*, size_t, size_t);
 
 /* LP32 NDK ctype.h contained references to these. */
-__LIBC64_HIDDEN__ extern const short* _tolower_tab_;
-__LIBC64_HIDDEN__ extern const short* _toupper_tab_;
+__LIBC32_LEGACY_PUBLIC__ extern const short* _tolower_tab_;
+__LIBC32_LEGACY_PUBLIC__ extern const short* _toupper_tab_;
 
 __LIBC_HIDDEN__ extern const char _C_ctype_[];
 __LIBC_HIDDEN__ extern const short _C_toupper_[];
 __LIBC_HIDDEN__ extern const short _C_tolower_[];
 __LIBC_HIDDEN__ extern char* __findenv(const char*, int, int*);
 __LIBC_HIDDEN__ extern char* _mktemp(char*);
-
-/* TODO: hide this when android_support.a is fixed (http://b/16298580).*/
-/*__LIBC_HIDDEN__*/ extern int __isthreaded;
 
 #endif

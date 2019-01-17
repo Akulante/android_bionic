@@ -27,12 +27,15 @@
  */
 
 #include <private/bionic_asm.h>
-#include <private/libc_events.h>
 
     .syntax unified
 
     .thumb
     .thumb_func
+
+    // To avoid warning about deprecated instructions, add an explicit
+    // arch. The code generated is exactly the same.
+    .arch armv7-a
 
 // Get the length of the source string first, then do a memcpy of the data
 // instead of a strcpy.
@@ -148,12 +151,16 @@ ENTRY(__strcpy_chk)
     pld     [r1, #0]
     pld     [r1, #64]
     ldr     r0, [sp]
+<<<<<<< HEAD
     cmp     r3, lr
     bhs     .L_strcpy_chk_failed
+=======
+>>>>>>> android_bionic/lineage-15.1
 
     // Add 1 for copy length to get the string terminator.
     add     r2, r3, #1
 
+<<<<<<< HEAD
 #include "memcpy_base.S"
 
 .L_strcpy_chk_failed:
@@ -171,3 +178,13 @@ END(__strcpy_chk)
     .data
 error_string:
     .string "strcpy: prevented write past end of buffer"
+=======
+    cmp     r2, lr
+    itt     hi
+    movhi   r0, r2
+    bhi     __strcpy_chk_fail
+
+#include "memcpy_base.S"
+
+END(__strcpy_chk)
+>>>>>>> android_bionic/lineage-15.1

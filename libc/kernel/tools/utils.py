@@ -13,8 +13,32 @@ def panic(msg):
     sys.exit(1)
 
 
-def find_program_dir():
-    return os.path.dirname(sys.argv[0])
+def get_kernel_headers_dir():
+    return os.path.join(get_android_root(), "external/kernel-headers")
+
+
+def get_kernel_headers_original_dir():
+    return os.path.join(get_kernel_headers_dir(), "original")
+
+
+def get_kernel_headers_modified_dir():
+    return os.path.join(get_kernel_headers_dir(), "modified")
+
+
+def get_kernel_dir():
+    return os.path.join(get_android_root(), "bionic/libc/kernel")
+
+
+def get_android_root():
+    if "ANDROID_BUILD_TOP" in os.environ:
+        # Verify that the current directory is in the root.
+        # If not, then print an error.
+        cwd = os.getcwd()
+        root = os.environ["ANDROID_BUILD_TOP"]
+        if len(cwd) < len(root) or not root == cwd[:len(root)]:
+            panic("Not in android tree pointed at by ANDROID_BUILD_TOP (%s)\n" % root)
+        return os.environ["ANDROID_BUILD_TOP"]
+    panic("Unable to find root of tree, did you forget to lunch a target?\n")
 
 
 class StringOutput:

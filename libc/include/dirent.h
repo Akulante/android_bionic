@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 __BEGIN_DECLS
 
@@ -46,17 +47,24 @@ __BEGIN_DECLS
 #define DT_WHT 14
 #endif
 
+#if defined(__LP64__)
+#define __DIRENT64_INO_T ino_t
+#else
+#define __DIRENT64_INO_T uint64_t /* Historical accident. */
+#endif
+
 #define __DIRENT64_BODY \
-    uint64_t         d_ino; \
-    int64_t          d_off; \
-    unsigned short   d_reclen; \
-    unsigned char    d_type; \
-    char             d_name[256]; \
+    __DIRENT64_INO_T d_ino; \
+    off64_t d_off; \
+    unsigned short d_reclen; \
+    unsigned char d_type; \
+    char d_name[256]; \
 
 struct dirent { __DIRENT64_BODY };
 struct dirent64 { __DIRENT64_BODY };
 
 #undef __DIRENT64_BODY
+#undef __DIRENT64_INO_T
 
 /* glibc compatibility. */
 #undef _DIRENT_HAVE_D_NAMLEN /* Linux doesn't have a d_namlen field. */
@@ -68,21 +76,29 @@ struct dirent64 { __DIRENT64_BODY };
 
 typedef struct DIR DIR;
 
-extern DIR* opendir(const char*);
-extern DIR* fdopendir(int);
-extern struct dirent* readdir(DIR*);
-extern struct dirent64* readdir64(DIR*);
-extern int readdir_r(DIR*, struct dirent*, struct dirent**);
-extern int readdir64_r(DIR*, struct dirent64*, struct dirent64**);
-extern int closedir(DIR*);
-extern void rewinddir(DIR*);
-extern void seekdir(DIR*, long);
-extern long telldir(DIR*);
-extern int dirfd(DIR*);
-extern int alphasort(const struct dirent**, const struct dirent**);
-extern int alphasort64(const struct dirent64**, const struct dirent64**);
-extern int scandir(const char*, struct dirent***, int (*)(const struct dirent*), int (*)(const struct dirent**, const struct dirent**));
-extern int scandir64(const char*, struct dirent64***, int (*)(const struct dirent64*), int (*)(const struct dirent64**, const struct dirent64**));
+DIR* opendir(const char*);
+DIR* fdopendir(int);
+struct dirent* readdir(DIR*);
+struct dirent64* readdir64(DIR*) __INTRODUCED_IN(21);
+int readdir_r(DIR*, struct dirent*, struct dirent**);
+int readdir64_r(DIR*, struct dirent64*, struct dirent64**) __INTRODUCED_IN(21);
+int closedir(DIR*);
+void rewinddir(DIR*);
+void seekdir(DIR*, long) __INTRODUCED_IN(23);
+long telldir(DIR*) __INTRODUCED_IN(23);
+int dirfd(DIR*);
+int alphasort(const struct dirent**, const struct dirent**);
+int alphasort64(const struct dirent64**, const struct dirent64**) __INTRODUCED_IN(21);
+int scandir64(const char*, struct dirent64***, int (*)(const struct dirent64*),
+              int (*)(const struct dirent64**, const struct dirent64**)) __INTRODUCED_IN(21);
+int scandir(const char*, struct dirent***, int (*)(const struct dirent*), int (*)(const struct dirent**, const struct dirent**));
+
+#if defined(__USE_GNU)
+int scandirat64(int, const char*, struct dirent64***, int (*)(const struct dirent64*),
+                int (*)(const struct dirent64**, const struct dirent64**)) __INTRODUCED_IN(24);
+int scandirat(int, const char*, struct dirent***, int (*)(const struct dirent*),
+              int (*)(const struct dirent**, const struct dirent**)) __INTRODUCED_IN(24);
+#endif
 
 __END_DECLS
 

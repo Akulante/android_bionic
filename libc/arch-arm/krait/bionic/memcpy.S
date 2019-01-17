@@ -29,7 +29,6 @@
 /* Assumes neon instructions and a cache line size of 32 bytes. */
 
 #include <private/bionic_asm.h>
-#include <private/libc_events.h>
 
 /*
  * This code assumes it is running on a processor that supports all arm v7
@@ -45,9 +44,18 @@
 
 ENTRY(__memcpy_chk)
         cmp         r2, r3
+<<<<<<< HEAD
         bhi         .L_memcpy_chk_fail
+=======
+        bls         memcpy
+>>>>>>> android_bionic/lineage-15.1
 
-        // Fall through to memcpy...
+        // Preserve lr for backtrace.
+        push        {lr}
+        .cfi_def_cfa_offset 4
+        .cfi_rel_offset lr, 0
+
+        bl          __memcpy_chk_fail
 END(__memcpy_chk)
 
 ENTRY(memcpy)
@@ -58,6 +66,7 @@ ENTRY(memcpy)
         .cfi_rel_offset lr, 4
 
 #include "memcpy_base.S"
+<<<<<<< HEAD
 
         // Undo the cfi directives from above.
         .cfi_adjust_cfa_offset -8
@@ -83,3 +92,6 @@ END(memcpy)
         .data
 error_string:
         .string     "memcpy: prevented write past end of buffer"
+=======
+END(memcpy)
+>>>>>>> android_bionic/lineage-15.1

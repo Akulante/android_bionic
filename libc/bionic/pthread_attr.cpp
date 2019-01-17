@@ -33,9 +33,10 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <async_safe/log.h>
+
 #include "private/bionic_string_utils.h"
 #include "private/ErrnoRestorer.h"
-#include "private/libc_logging.h"
 #include "pthread_internal.h"
 
 int pthread_attr_init(pthread_attr_t* attr) {
@@ -114,6 +115,36 @@ int pthread_attr_setstack(pthread_attr_t* attr, void* stack_base, size_t stack_s
   return 0;
 }
 
+static uintptr_t __get_main_stack_startstack() {
+  FILE* fp = fopen("/proc/self/stat", "re");
+  if (fp == nullptr) {
+    async_safe_fatal("couldn't open /proc/self/stat: %s", strerror(errno));
+  }
+
+  char line[BUFSIZ];
+  if (fgets(line, sizeof(line), fp) == nullptr) {
+    async_safe_fatal("couldn't read /proc/self/stat: %s", strerror(errno));
+  }
+
+  fclose(fp);
+
+  // See man 5 proc. There's no reason comm can't contain ' ' or ')',
+  // so we search backwards for the end of it. We're looking for this field:
+  //
+  //  startstack %lu (28) The address of the start (i.e., bottom) of the stack.
+  uintptr_t startstack = 0;
+  const char* end_of_comm = strrchr(line, ')');
+  if (sscanf(end_of_comm + 1, " %*c "
+             "%*d %*d %*d %*d %*d "
+             "%*u %*u %*u %*u %*u %*u %*u "
+             "%*d %*d %*d %*d %*d %*d "
+             "%*u %*u %*d %*u %*u %*u %" SCNuPTR, &startstack) != 1) {
+    async_safe_fatal("couldn't parse /proc/self/stat");
+  }
+
+  return startstack;
+}
+
 static int __pthread_attr_getstack_main_thread(void** stack_base, size_t* stack_size) {
   ErrnoRestorer errno_restorer;
 
@@ -127,20 +158,19 @@ static int __pthread_attr_getstack_main_thread(void** stack_base, size_t* stack_
     stack_limit.rlim_cur = 8 * 1024 * 1024;
   }
 
-  // It shouldn't matter which thread we are because we're just looking for "[stack]", but
-  // valgrind seems to mess with the stack enough that the kernel will report "[stack:pid]"
-  // instead if you look in /proc/self/maps, so we need to look in /proc/pid/task/pid/maps.
-  char path[64];
-  snprintf(path, sizeof(path), "/proc/self/task/%d/maps", getpid());
-  FILE* fp = fopen(path, "re");
-  if (fp == NULL) {
-    return errno;
+  // Ask the kernel where our main thread's stack started.
+  uintptr_t startstack = __get_main_stack_startstack();
+
+  // Hunt for the region that contains that address.
+  FILE* fp = fopen("/proc/self/maps", "re");
+  if (fp == nullptr) {
+    async_safe_fatal("couldn't open /proc/self/maps");
   }
   char line[BUFSIZ];
   while (fgets(line, sizeof(line), fp) != NULL) {
-    if (ends_with(line, " [stack]\n")) {
-      uintptr_t lo, hi;
-      if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &lo, &hi) == 2) {
+    uintptr_t lo, hi;
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &lo, &hi) == 2) {
+      if (lo <= startstack && startstack <= hi) {
         *stack_size = stack_limit.rlim_cur;
         *stack_base = reinterpret_cast<void*>(hi - *stack_size);
         fclose(fp);
@@ -148,7 +178,7 @@ static int __pthread_attr_getstack_main_thread(void** stack_base, size_t* stack_
       }
     }
   }
-  __libc_fatal("No [stack] line found in \"%s\"!", path);
+  async_safe_fatal("Stack not found in /proc/self/maps");
 }
 
 int pthread_attr_getstack(const pthread_attr_t* attr, void** stack_base, size_t* stack_size) {

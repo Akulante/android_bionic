@@ -39,11 +39,23 @@ typedef elf_greg_t elf_gregset_t[NGREG];
 
 typedef fpregset_t elf_fpregset_t;
 
+#if defined(__i386__)
+typedef struct user_fpxregs_struct elf_fpxregset_t;
+#endif
+
 typedef elf_gregset_t prgregset_t;
 typedef elf_fpregset_t prfpregset_t;
 
 typedef pid_t lwpid_t;
 typedef void* psaddr_t;
+
+struct elf_siginfo {
+  int si_signo;
+  int si_code;
+  int si_errno;
+};
+
+#define ELF_PRARGSZ 80
 
 __END_DECLS
 

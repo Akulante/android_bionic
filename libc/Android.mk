@@ -1,5 +1,6 @@
 LOCAL_PATH := $(call my-dir)
 
+<<<<<<< HEAD
 bionic_coverage := false
 
 # Make everything depend on any changes to included makefiles.
@@ -1545,4 +1546,7 @@ include $(BUILD_STATIC_LIBRARY)
 
 
 # ========================================================
+=======
+>>>>>>> android_bionic/lineage-15.1
 include $(call all-makefiles-under,$(LOCAL_PATH))
+

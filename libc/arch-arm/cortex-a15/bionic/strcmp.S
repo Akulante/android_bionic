@@ -26,7 +26,6 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <machine/cpu-features.h>
 #include <private/bionic_asm.h>
 
 #ifdef __ARMEB__
@@ -57,6 +56,10 @@
         .thumb
         .thumb_func
 #endif
+
+        // To avoid warning about deprecated instructions, add an explicit
+        // arch. The code generated is exactly the same.
+        .arch armv7-a
 
 ENTRY(strcmp)
       /* Use LDRD whenever possible.  */

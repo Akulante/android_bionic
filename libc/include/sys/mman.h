@@ -38,41 +38,50 @@ __BEGIN_DECLS
 #define MAP_ANON  MAP_ANONYMOUS
 #endif
 
-#define MAP_FAILED ((void *)-1)
+#define MAP_FAILED __BIONIC_CAST(reinterpret_cast, void*, -1)
 
 #define MREMAP_MAYMOVE  1
 #define MREMAP_FIXED    2
 
+#if defined(__USE_FILE_OFFSET64)
+void* mmap(void*, size_t, int, int, int, off_t) __RENAME(mmap64) __INTRODUCED_IN(21);
+#else
+void* mmap(void*, size_t, int, int, int, off_t);
+#endif
+
+void* mmap64(void*, size_t, int, int, int, off64_t) __INTRODUCED_IN(21);
+
+int munmap(void*, size_t);
+int msync(void*, size_t, int);
+int mprotect(void*, size_t, int);
+void* mremap(void*, size_t, size_t, int, ...);
+
+int mlockall(int) __INTRODUCED_IN(17);
+int munlockall(void) __INTRODUCED_IN(17);
+
+int mlock(const void*, size_t);
+int munlock(const void*, size_t);
+
+int mincore(void*, size_t, unsigned char*);
+
+int madvise(void*, size_t, int);
+
+#if __ANDROID_API__ >= __ANDROID_API_M__
+/*
+ * Some third-party code uses the existence of POSIX_MADV_NORMAL to detect the
+ * availability of posix_madvise. This is not correct, since having up-to-date
+ * UAPI headers says nothing about the C library, but for the time being we
+ * don't want to harm adoption of the unified headers.
+ *
+ * https://github.com/android-ndk/ndk/issues/395
+ */
 #define POSIX_MADV_NORMAL     MADV_NORMAL
 #define POSIX_MADV_RANDOM     MADV_RANDOM
 #define POSIX_MADV_SEQUENTIAL MADV_SEQUENTIAL
 #define POSIX_MADV_WILLNEED   MADV_WILLNEED
 #define POSIX_MADV_DONTNEED   MADV_DONTNEED
-
-#if defined(__USE_FILE_OFFSET64)
-extern void* mmap(void*, size_t, int, int, int, off_t) __RENAME(mmap64);
-#else
-extern void* mmap(void*, size_t, int, int, int, off_t);
 #endif
-extern void* mmap64(void*, size_t, int, int, int, off64_t);
-
-extern int munmap(void*, size_t);
-extern int msync(const void*, size_t, int);
-extern int mprotect(const void*, size_t, int);
-extern void* mremap(void*, size_t, size_t, unsigned long);
-
-extern int mlockall(int);
-extern int munlockall(void);
-extern int mlock(const void*, size_t);
-extern int munlock(const void*, size_t);
-extern int madvise(void*, size_t, int);
-
-extern int mlock(const void*, size_t);
-extern int munlock(const void*, size_t);
-
-extern int mincore(void*, size_t, unsigned char*);
-
-extern int posix_madvise(void*, size_t, int);
+int posix_madvise(void*, size_t, int) __INTRODUCED_IN(23);
 
 __END_DECLS
 

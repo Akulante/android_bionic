@@ -25,6 +25,7 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+
 /*
  * libc_init_dynamic.c
  *
@@ -50,15 +51,30 @@
 #include <elf.h>
 #include "libc_init_common.h"
 
+#include "private/bionic_globals.h"
+#include "private/bionic_ssp.h"
 #include "private/bionic_tls.h"
 #include "private/KernelArgumentBlock.h"
 
 extern "C" {
-  extern void malloc_debug_init(void);
-  extern void malloc_debug_fini(void);
   extern void netdClientInit(void);
   extern int __cxa_atexit(void (*)(void *), void *, void *);
 };
+
+// We need a helper function for __libc_preinit because compiling with LTO may
+// inline functions requiring a stack protector check, but __stack_chk_guard is
+// not initialized at the start of __libc_preinit. __libc_preinit_impl will run
+// after __stack_chk_guard is initialized and therefore can safely have a stack
+// protector.
+__attribute__((noinline))
+static void __libc_preinit_impl(KernelArgumentBlock& args) {
+  __libc_init_globals(args);
+  __libc_init_common(args);
+
+  // Hooks for various libraries to let them know that we're starting up.
+  __libc_globals.mutate(__libc_init_malloc);
+  netdClientInit();
+}
 
 // We flag the __libc_preinit function as a constructor to ensure
 // that its address is listed in libc.so's .init_array section.
@@ -74,16 +90,11 @@ __attribute__((constructor)) static void __libc_preinit() {
   // __libc_init_common() will change the TLS area so the old one won't be accessible anyway.
   *args_slot = NULL;
 
-  __libc_init_common(*args);
+  // The linker has initialized its copy of the global stack_chk_guard, and filled in the main
+  // thread's TLS slot with that value. Initialize the local global stack guard with its value.
+  __stack_chk_guard = reinterpret_cast<uintptr_t>(tls[TLS_SLOT_STACK_GUARD]);
 
-  // Hooks for various libraries to let them know that we're starting up.
-  malloc_debug_init();
-  netdClientInit();
-}
-
-__LIBC_HIDDEN__ void __libc_postfini() {
-  // A hook for the debug malloc library to let it know that we're shutting down.
-  malloc_debug_fini();
+  __libc_preinit_impl(*args);
 }
 
 // This function is called from the executable's _start entry point
@@ -111,4 +122,10 @@ __noreturn void __libc_init(void* raw_args,
   }
 
   exit(slingshot(args.argc, args.argv, args.envp));
+}
+
+extern "C" uint32_t android_get_application_target_sdk_version();
+
+uint32_t bionic_get_application_target_sdk_version() {
+  return android_get_application_target_sdk_version();
 }

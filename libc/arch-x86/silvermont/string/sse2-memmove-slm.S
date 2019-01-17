@@ -73,15 +73,9 @@ name:		\
 	.size name, .-name
 #endif
 
-#ifdef USE_AS_BCOPY
-# define SRC		PARMS
-# define DEST		SRC+4
-# define LEN		DEST+4
-#else
-# define DEST		PARMS
-# define SRC		DEST+4
-# define LEN		SRC+4
-#endif
+#define DEST		PARMS
+#define SRC		DEST+4
+#define LEN		SRC+4
 
 #define CFI_PUSH(REG)		\
   cfi_adjust_cfa_offset (4);		\
@@ -326,6 +320,9 @@ L(mm_len_9_16_bytes_forward):
 	movq	%xmm0, (%edx)
 	movq	%xmm1, -8(%edx, %ecx)
 	jmp	L(mm_return)
+
+	CFI_POP (%edi)
+	CFI_POP (%esi)
 
 L(mm_recalc_len):
 /* Compute in %ecx how many bytes are left to copy after

@@ -1,5 +1,6 @@
 LOCAL_PATH := $(call my-dir)
 
+<<<<<<< HEAD
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= \
@@ -87,4 +88,6 @@ LOCAL_POST_LINK_CMD = $(hide) $($(LOCAL_2ND_ARCH_VAR_PREFIX)TARGET_OBJCOPY) \
 
 include $(BUILD_EXECUTABLE)
 
+=======
+>>>>>>> android_bionic/lineage-15.1
 include $(call first-makefiles-under,$(LOCAL_PATH))

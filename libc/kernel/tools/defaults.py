@@ -12,12 +12,6 @@ kernel_archs = [ 'arm', 'arm64', 'mips', 'x86' ]
 # tree. used when looking for sources...
 kernel_dirs = [ "linux", "asm", "asm-generic", "mtd" ]
 
-# path to the directory containing the original kernel headers
-kernel_original_path = os.path.normpath( find_program_dir() + '/../../../../external/kernel-headers/original' )
-
-# path to the default location of the cleaned-up headers
-kernel_cleaned_path = os.path.normpath( find_program_dir() + '/..' )
-
 # a special value that is used to indicate that a given macro is known to be
 # undefined during optimization
 kCppUndefinedMacro = "<<<undefined>>>"
@@ -32,6 +26,9 @@ kernel_known_macros = {
     "CONFIG_64BIT": "__LP64__",
     "CONFIG_X86_32": "__i386__",
     "__EXPORTED_HEADERS__": "1",
+    "__HAVE_BUILTIN_BSWAP16__": "1",
+    "__HAVE_BUILTIN_BSWAP32__": "1",
+    "__HAVE_BUILTIN_BSWAP64__": "1",
     }
 
 # define to true if you want to remove all defined(CONFIG_FOO) tests
@@ -59,25 +56,40 @@ kernel_arch_token_replacements = {
     "x86": {},
     }
 
-# Replace tokens in the output according to this mapping
+# Replace tokens in the output according to this mapping.
 kernel_token_replacements = {
-    "asm": "__asm__",
+    # The kernel's ARG_MAX is actually the "minimum" maximum (see fs/exec.c).
+    "ARG_MAX": "_KERNEL_ARG_MAX",
     # The kernel usage of __unused for unused struct fields conflicts with the macro defined in <sys/cdefs.h>.
     "__unused": "__linux_unused",
+    # The kernel usage of C++ keywords causes problems for C++ code so rename.
+    "private": "__linux_private",
+    "virtual": "__linux_virtual",
+    # The non-64 stuff is legacy; msqid64_ds/ipc64_perm is what userspace wants.
+    "msqid_ds": "__kernel_legacy_msqid_ds",
+    "semid_ds": "__kernel_legacy_semid_ds",
+    "shmid_ds": "__kernel_legacy_shmid_ds",
+    "ipc_perm": "__kernel_legacy_ipc_perm",
+    # The kernel semun isn't usable (https://github.com/android-ndk/ndk/issues/400).
+    "semun": "__kernel_legacy_semun",
     # The kernel's _NSIG/NSIG are one less than the userspace value, so we need to move them aside.
     "_NSIG": "_KERNEL__NSIG",
     "NSIG": "_KERNEL_NSIG",
     # The kernel's SIGRTMIN/SIGRTMAX are absolute limits; userspace steals a few.
     "SIGRTMIN": "__SIGRTMIN",
     "SIGRTMAX": "__SIGRTMAX",
+    # We want to support both BSD and Linux member names in struct udphdr.
+    "udphdr": "__kernel_udphdr",
+    # The kernel's struct epoll_event just has __u64 for the data.
+    "epoll_event": "__kernel_uapi_epoll_event",
+    # This causes problems when trying to export the headers for the ndk.
+    "__attribute_const__": "__attribute__((__const__))",
     }
 
-# this is the set of known static inline functions that we want to keep
-# in the final ARM headers. this is only used to keep optimized byteswapping
-# static functions and stuff like that.
-# TODO: this isn't working!
+# This is the set of known static inline functions that we want to keep
+# in the final kernel headers.
 kernel_known_arm_statics = set(
-        [ "___arch__swab32",    # asm-arm/byteorder.h
+        [
         ]
     )
 
@@ -92,8 +104,7 @@ kernel_known_mips_statics = set(
     )
 
 kernel_known_x86_statics = set(
-        [ "___arch__swab32",  # asm-x86/byteorder.h
-          "___arch__swab64",  # asm-x86/byteorder.h
+        [
         ]
     )
 
@@ -101,6 +112,26 @@ kernel_known_generic_statics = set(
         [
           "ipt_get_target",  # uapi/linux/netfilter_ipv4/ip_tables.h
           "ip6t_get_target", # uapi/linux/netfilter_ipv6/ip6_tables.h
+          # Byte swapping inlines from uapi/linux/swab.h
+          # The below functions are the ones we are guaranting we export.
+          "__swab16",
+          "__swab32",
+          "__swab64",
+          "__swab16p",
+          "__swab32p",
+          "__swab64p",
+          "__swab16s",
+          "__swab32s",
+          "__swab64s",
+          "__swahw32",
+          "__swahb32",
+          "__swahw32p",
+          "__swahb32p",
+          "__swahw32s",
+          "__swahb32s",
+          # These are required to support the above functions.
+          "__fswahw32",
+          "__fswahb32",
         ]
     )
 
@@ -144,9 +175,4 @@ kernel_disclaimer = """\
  ***
  ****************************************************************************
  ****************************************************************************/
-"""
-
-# This is the warning line that will be inserted every N-th line in the output
-kernel_warning = """\
-/* WARNING: DO NOT EDIT, AUTO-GENERATED CODE - SEE TOP FOR INSTRUCTIONS */
 """

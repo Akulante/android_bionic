@@ -234,24 +234,22 @@ bool ElfFile<ELF>::Load() {
   }
 
   // Loading failed if we did not find the required special sections.
-  if (!found_relocations_section) {
-    LOG(ERROR) << "Missing or empty .rel.dyn or .rela.dyn section";
-    return false;
-  }
   if (!found_dynamic_section) {
     LOG(ERROR) << "Missing .dynamic section";
     return false;
   }
 
-  // Loading failed if we could not identify the relocations type.
-  if (!has_rel_relocations && !has_rela_relocations) {
-    LOG(ERROR) << "No relocations sections found";
-    return false;
-  }
-  if (has_rel_relocations && has_rela_relocations) {
-    LOG(ERROR) << "Multiple relocations sections with different types found, "
-               << "not currently supported";
-    return false;
+  if (found_relocations_section != nullptr) {
+    // Loading failed if we could not identify the relocations type.
+    if (!has_rel_relocations && !has_rela_relocations) {
+      LOG(ERROR) << "No relocations sections found";
+      return false;
+    }
+    if (has_rel_relocations && has_rela_relocations) {
+      LOG(ERROR) << "Multiple relocations sections with different types found, "
+                 << "not currently supported";
+      return false;
+    }
   }
 
   elf_ = elf;
@@ -302,13 +300,75 @@ static void AdjustSectionHeadersForHole(Elf* elf,
   }
 }
 
-// Helper for ResizeSection().  Adjust the offsets of any program headers
-// that have offsets currently beyond the hole start.
+// Helpers for ResizeSection().  On packing, reduce p_align for LOAD segments
+// to 4kb if larger.  On unpacking, restore p_align for LOAD segments if
+// packing reduced it to 4kb.  Return true if p_align was changed.
 template <typename ELF>
-static void AdjustProgramHeaderOffsets(typename ELF::Phdr* program_headers,
+static bool ClampLoadSegmentAlignment(typename ELF::Phdr* program_header) {
+  CHECK(program_header->p_type == PT_LOAD);
+
+  // If large, reduce p_align for a LOAD segment to page size on packing.
+  if (program_header->p_align > kPageSize) {
+    program_header->p_align = kPageSize;
+    return true;
+  }
+  return false;
+}
+
+template <typename ELF>
+static bool RestoreLoadSegmentAlignment(typename ELF::Phdr* program_headers,
+                                        size_t count,
+                                        typename ELF::Phdr* program_header) {
+  CHECK(program_header->p_type == PT_LOAD);
+
+  // If p_align was reduced on packing, restore it to its previous value
+  // on unpacking.  We do this by searching for a different LOAD segment
+  // and setting p_align to that of the other LOAD segment found.
+  //
+  // Relies on the following observations:
+  //   - a packable ELF executable has more than one LOAD segment;
+  //   - before packing all LOAD segments have the same p_align;
+  //   - on packing we reduce only one LOAD segment's p_align.
+  if (program_header->p_align == kPageSize) {
+    for (size_t i = 0; i < count; ++i) {
+      typename ELF::Phdr* other_header = &program_headers[i];
+      if (other_header->p_type == PT_LOAD && other_header != program_header) {
+        program_header->p_align = other_header->p_align;
+        return true;
+      }
+    }
+    LOG(WARNING) << "Cannot find a LOAD segment from which to restore p_align";
+  }
+  return false;
+}
+
+template <typename ELF>
+static bool AdjustLoadSegmentAlignment(typename ELF::Phdr* program_headers,
                                        size_t count,
-                                       typename ELF::Off hole_start,
+                                       typename ELF::Phdr* program_header,
                                        ssize_t hole_size) {
+  CHECK(program_header->p_type == PT_LOAD);
+
+  bool status = false;
+  if (hole_size < 0) {
+    status = ClampLoadSegmentAlignment<ELF>(program_header);
+  } else if (hole_size > 0) {
+    status = RestoreLoadSegmentAlignment<ELF>(program_headers,
+                                              count,
+                                              program_header);
+  }
+  return status;
+}
+
+// Helper for ResizeSection().  Adjust the offsets of any program headers
+// that have offsets currently beyond the hole start, and adjust the
+// virtual and physical addrs (and perhaps alignment) of the others.
+template <typename ELF>
+static void AdjustProgramHeaderFields(typename ELF::Phdr* program_headers,
+                                      size_t count,
+                                      typename ELF::Off hole_start,
+                                      ssize_t hole_size) {
+  int alignment_changes = 0;
   for (size_t i = 0; i < count; ++i) {
     typename ELF::Phdr* program_header = &program_headers[i];
 
@@ -327,9 +387,20 @@ static void AdjustProgramHeaderOffsets(typename ELF::Phdr* program_headers,
     } else {
       program_header->p_vaddr -= hole_size;
       program_header->p_paddr -= hole_size;
-      if (program_header->p_align > kPageSize) {
-        program_header->p_align = kPageSize;
+
+      // If packing, clamp LOAD segment alignment to 4kb to prevent strip
+      // from adjusting it unnecessarily if run on a packed file.  If
+      // unpacking, attempt to restore a reduced alignment to its previous
+      // value.  Ensure that we do this on at most one LOAD segment.
+      if (program_header->p_type == PT_LOAD) {
+        alignment_changes += AdjustLoadSegmentAlignment<ELF>(program_headers,
+                                                             count,
+                                                             program_header,
+                                                             hole_size);
+        LOG_IF(FATAL, alignment_changes > 1)
+            << "Changed p_align on more than one LOAD segment";
       }
+
       VLOG(1) << "phdr[" << i
               << "] p_vaddr adjusted to "<< program_header->p_vaddr
               << "; p_paddr adjusted to "<< program_header->p_paddr
@@ -383,10 +454,10 @@ static void RewriteProgramHeadersForHole(Elf* elf,
   target_load_header->p_memsz += hole_size;
 
   // Adjust the offsets and p_vaddrs
-  AdjustProgramHeaderOffsets<ELF>(elf_program_header,
-                                  program_header_count,
-                                  hole_start,
-                                  hole_size);
+  AdjustProgramHeaderFields<ELF>(elf_program_header,
+                                 program_header_count,
+                                 hole_start,
+                                 hole_size);
 }
 
 // Helper for ResizeSection().  Locate and return the dynamic section.
@@ -479,11 +550,11 @@ void ElfFile<ELF>::AdjustDynamicSectionForHole(Elf_Scn* dynamic_section,
               << " d_val adjusted to " << dynamic->d_un.d_val;
     }
 
-    // Special case: DT_MIPS_RLD_MAP2 stores the difference between dynamic
+    // Special case: DT_MIPS_RLD_MAP_REL stores the difference between dynamic
     // entry address and the address of the _r_debug (used by GDB)
     // since the dynamic section and target address are on the
     // different sides of the hole it needs to be adjusted accordingly
-    if (tag == DT_MIPS_RLD_MAP2) {
+    if (tag == DT_MIPS_RLD_MAP_REL) {
       dynamic->d_un.d_val += hole_size;
       VLOG(1) << "dynamic[" << i << "] " << dynamic->d_tag
               << " d_val adjusted to " << dynamic->d_un.d_val;
@@ -609,6 +680,11 @@ bool ElfFile<ELF>::PackRelocations() {
     return false;
   }
 
+  if (relocations_section_ == nullptr) {
+    // There is nothing to do
+    return true;
+  }
+
   // Retrieve the current dynamic relocations section data.
   Elf_Data* data = GetSectionData(relocations_section_);
   // we always pack rela, because packed format is pretty much the same
@@ -666,7 +742,7 @@ bool ElfFile<ELF>::PackTypedRelocations(std::vector<typename ELF::Rela>* relocat
   VLOG(1) << "Packed         (no padding): " << packed_bytes_estimate << " bytes";
 
   if (packed.empty()) {
-    LOG(INFO) << "Too few relocations to pack";
+    VLOG(1) << "Too few relocations to pack";
     return true;
   }
 
@@ -679,16 +755,16 @@ bool ElfFile<ELF>::PackTypedRelocations(std::vector<typename ELF::Rela>* relocat
   // hole_size needs to be page_aligned.
   hole_size -= hole_size % kPreserveAlignment;
 
-  LOG(INFO) << "Compaction                 : " << hole_size << " bytes";
+  VLOG(1) << "Compaction                 : " << hole_size << " bytes";
 
   // Adjusting for alignment may have removed any packing benefit.
   if (hole_size == 0) {
-    LOG(INFO) << "Too few relocations to pack after alignment";
+    VLOG(1) << "Too few relocations to pack after alignment";
     return true;
   }
 
   if (hole_size <= 0) {
-    LOG(INFO) << "Packing relocations saves no space";
+    VLOG(1) << "Packing relocations saves no space";
     return true;
   }
 
@@ -756,6 +832,11 @@ bool ElfFile<ELF>::UnpackRelocations() {
   if (!Load()) {
     LOG(ERROR) << "Failed to load as ELF";
     return false;
+  }
+
+  if (relocations_section_ == nullptr) {
+    // There is nothing to do
+    return true;
   }
 
   typename ELF::Shdr* section_header = ELF::getshdr(relocations_section_);

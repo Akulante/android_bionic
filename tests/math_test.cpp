@@ -57,7 +57,7 @@ template<typename T> inline int test_capture_isinf(const T in) {
 #include <limits.h>
 #include <stdint.h>
 
-#include <private/ScopeGuard.h>
+#include <android-base/scopeguard.h>
 
 float float_subnormal() {
   union {
@@ -383,6 +383,27 @@ TEST(math, sinf) {
 
 TEST(math, sinl) {
   ASSERT_DOUBLE_EQ(0.0L, sinl(0.0L));
+}
+
+TEST(math, sincos) {
+  double s, c;
+  sincos(0.0, &s, &c);
+  ASSERT_DOUBLE_EQ(0.0, s);
+  ASSERT_DOUBLE_EQ(1.0, c);
+}
+
+TEST(math, sincosf) {
+  float s, c;
+  sincosf(0.0f, &s, &c);
+  ASSERT_FLOAT_EQ(0.0f, s);
+  ASSERT_FLOAT_EQ(1.0f, c);
+}
+
+TEST(math, sincosl) {
+  long double s, c;
+  sincosl(0.0L, &s, &c);
+  ASSERT_DOUBLE_EQ(0.0L, s);
+  ASSERT_DOUBLE_EQ(1.0L, c);
 }
 
 TEST(math, tan) {
@@ -754,9 +775,7 @@ TEST(math, erfcl) {
 }
 
 TEST(math, lrint) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
 
   fesetround(FE_UPWARD); // lrint/lrintf/lrintl obey the rounding mode.
   ASSERT_EQ(1235, lrint(1234.01));
@@ -778,9 +797,7 @@ TEST(math, lrint) {
 }
 
 TEST(math, rint) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
 
   fesetround(FE_UPWARD); // rint/rintf/rintl obey the rounding mode.
   feclearexcept(FE_ALL_EXCEPT); // rint/rintf/rintl do set the FE_INEXACT flag.
@@ -808,9 +825,7 @@ TEST(math, rint) {
 }
 
 TEST(math, nearbyint) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // nearbyint/nearbyintf/nearbyintl obey the rounding mode.
   feclearexcept(FE_ALL_EXCEPT); // nearbyint/nearbyintf/nearbyintl don't set the FE_INEXACT flag.
   ASSERT_EQ(1234.0, nearbyint(1234.0));
@@ -837,9 +852,7 @@ TEST(math, nearbyint) {
 }
 
 TEST(math, lround) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // lround ignores the rounding mode.
   ASSERT_EQ(1234, lround(1234.01));
   ASSERT_EQ(1234, lroundf(1234.01f));
@@ -847,9 +860,7 @@ TEST(math, lround) {
 }
 
 TEST(math, llround) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // llround ignores the rounding mode.
   ASSERT_EQ(1234L, llround(1234.01));
   ASSERT_EQ(1234L, llroundf(1234.01f));
@@ -944,9 +955,7 @@ TEST(math, fdiml) {
 }
 
 TEST(math, round) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_TOWARDZERO); // round ignores the rounding mode and always rounds away from zero.
   ASSERT_DOUBLE_EQ(1.0, round(0.5));
   ASSERT_DOUBLE_EQ(-1.0, round(-0.5));
@@ -957,9 +966,7 @@ TEST(math, round) {
 }
 
 TEST(math, roundf) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_TOWARDZERO); // roundf ignores the rounding mode and always rounds away from zero.
   ASSERT_FLOAT_EQ(1.0f, roundf(0.5f));
   ASSERT_FLOAT_EQ(-1.0f, roundf(-0.5f));
@@ -970,9 +977,7 @@ TEST(math, roundf) {
 }
 
 TEST(math, roundl) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_TOWARDZERO); // roundl ignores the rounding mode and always rounds away from zero.
   ASSERT_DOUBLE_EQ(1.0L, roundl(0.5L));
   ASSERT_DOUBLE_EQ(-1.0L, roundl(-0.5L));
@@ -983,9 +988,7 @@ TEST(math, roundl) {
 }
 
 TEST(math, trunc) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // trunc ignores the rounding mode and always rounds toward zero.
   ASSERT_DOUBLE_EQ(1.0, trunc(1.5));
   ASSERT_DOUBLE_EQ(-1.0, trunc(-1.5));
@@ -996,9 +999,7 @@ TEST(math, trunc) {
 }
 
 TEST(math, truncf) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // truncf ignores the rounding mode and always rounds toward zero.
   ASSERT_FLOAT_EQ(1.0f, truncf(1.5f));
   ASSERT_FLOAT_EQ(-1.0f, truncf(-1.5f));
@@ -1009,9 +1010,7 @@ TEST(math, truncf) {
 }
 
 TEST(math, truncl) {
-  auto guard = make_scope_guard([]() {
-    fesetenv(FE_DFL_ENV);
-  });
+  auto guard = android::base::make_scope_guard([]() { fesetenv(FE_DFL_ENV); });
   fesetround(FE_UPWARD); // truncl ignores the rounding mode and always rounds toward zero.
   ASSERT_DOUBLE_EQ(1.0L, truncl(1.5L));
   ASSERT_DOUBLE_EQ(-1.0L, truncl(-1.5L));
@@ -1639,6 +1638,16 @@ TEST(math, ldexpf_intel) {
   DoMathDataTest<1>(g_ldexpf_intel_data, ldexpf);
 }
 
+#include "math_data/llrint_intel_data.h"
+TEST(math, llrint_intel) {
+  DoMathDataTest<1>(g_llrint_intel_data, llrint);
+}
+
+#include "math_data/llrintf_intel_data.h"
+TEST(math, llrintf_intel) {
+  DoMathDataTest<1>(g_llrintf_intel_data, llrintf);
+}
+
 #include "math_data/log_intel_data.h"
 TEST(math, log_intel) {
   DoMathDataTest<1>(g_log_intel_data, log);
@@ -1687,6 +1696,16 @@ TEST(math, logb_intel) {
 #include "math_data/logbf_intel_data.h"
 TEST(math, logbf_intel) {
   DoMathDataTest<1>(g_logbf_intel_data, logbf);
+}
+
+#include "math_data/lrint_intel_data.h"
+TEST(math, lrint_intel) {
+  DoMathDataTest<1>(g_lrint_intel_data, lrint);
+}
+
+#include "math_data/lrintf_intel_data.h"
+TEST(math, lrintf_intel) {
+  DoMathDataTest<1>(g_lrintf_intel_data, lrintf);
 }
 
 #include "math_data/modf_intel_data.h"

@@ -29,27 +29,16 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <linux/uio.h>  // For UIO_MAXIOV.
 #include <pthread.h>
 #include <stdio.h>  // For FOPEN_MAX.
 #include <sys/auxv.h>
+#include <sys/param.h>
 #include <sys/resource.h>
-#include <sys/sysconf.h>
 #include <sys/sysinfo.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "private/bionic_tls.h"
-
-static int __sysconf_monotonic_clock() {
-  timespec t;
-  int rc = clock_getres(CLOCK_MONOTONIC, &t);
-  return (rc == -1) ? -1 : _POSIX_VERSION;
-}
-
-static bool __sysconf_has_clock(clockid_t clock_id) {
-  return clock_getres(clock_id, NULL) == 0;
-}
 
 static long __sysconf_rlimit(int resource) {
   rlimit rl;
@@ -59,18 +48,39 @@ static long __sysconf_rlimit(int resource) {
 
 long sysconf(int name) {
   switch (name) {
-    case _SC_ARG_MAX:           return ARG_MAX;
+    //
+    // Things we actually have to calculate...
+    //
+    case _SC_ARG_MAX:
+      // Not a constant since Linux 2.6.23; see fs/exec.c for details.
+      // At least 32 pages, otherwise a quarter of the stack limit.
+      return MAX(__sysconf_rlimit(RLIMIT_STACK) / 4, _KERNEL_ARG_MAX);
+
+    case _SC_AVPHYS_PAGES:      return get_avphys_pages();
+    case _SC_CHILD_MAX:         return __sysconf_rlimit(RLIMIT_NPROC);
+    case _SC_CLK_TCK:           return static_cast<long>(getauxval(AT_CLKTCK));
+    case _SC_NPROCESSORS_CONF:  return get_nprocs_conf();
+    case _SC_NPROCESSORS_ONLN:  return get_nprocs();
+    case _SC_OPEN_MAX:          return __sysconf_rlimit(RLIMIT_NOFILE);
+
+    case _SC_PAGESIZE:
+    case _SC_PAGE_SIZE:
+      // _SC_PAGESIZE and _SC_PAGE_SIZE are distinct, but return the same value.
+      return static_cast<long>(getauxval(AT_PAGESZ));
+
+    case _SC_PHYS_PAGES:        return get_phys_pages();
+
+    //
+    // Constants...
+    //
     case _SC_BC_BASE_MAX:       return _POSIX2_BC_BASE_MAX;   // Minimum requirement.
     case _SC_BC_DIM_MAX:        return _POSIX2_BC_DIM_MAX;    // Minimum requirement.
     case _SC_BC_SCALE_MAX:      return _POSIX2_BC_SCALE_MAX;  // Minimum requirement.
     case _SC_BC_STRING_MAX:     return _POSIX2_BC_STRING_MAX; // Minimum requirement.
-    case _SC_CHILD_MAX:         return __sysconf_rlimit(RLIMIT_NPROC);
-    case _SC_CLK_TCK:           return static_cast<long>(getauxval(AT_CLKTCK));
     case _SC_COLL_WEIGHTS_MAX:  return _POSIX2_COLL_WEIGHTS_MAX;  // Minimum requirement.
     case _SC_EXPR_NEST_MAX:     return _POSIX2_EXPR_NEST_MAX;     // Minimum requirement.
     case _SC_LINE_MAX:          return _POSIX2_LINE_MAX;          // Minimum requirement.
     case _SC_NGROUPS_MAX:       return NGROUPS_MAX;
-    case _SC_OPEN_MAX:          return __sysconf_rlimit(RLIMIT_NOFILE);
     case _SC_PASS_MAX:          return PASS_MAX;
     case _SC_2_C_BIND:          return _POSIX2_C_BIND;
     case _SC_2_C_DEV:           return _POSIX2_C_DEV;
@@ -95,10 +105,8 @@ long sysconf(int name) {
     case _SC_XOPEN_REALTIME_THREADS: return _XOPEN_REALTIME_THREADS;
     case _SC_XOPEN_LEGACY:      return _XOPEN_LEGACY;
     case _SC_ATEXIT_MAX:        return LONG_MAX;    // Unlimited.
-    case _SC_IOV_MAX:           return UIO_MAXIOV;
+    case _SC_IOV_MAX:           return IOV_MAX;
 
-    case _SC_PAGESIZE:          // Fall through, PAGESIZE and PAGE_SIZE always hold the same value.
-    case _SC_PAGE_SIZE:         return PAGE_SIZE;
     case _SC_XOPEN_UNIX:        return _XOPEN_UNIX;
     case _SC_AIO_LISTIO_MAX:    return _POSIX_AIO_LISTIO_MAX;     // Minimum requirement.
     case _SC_AIO_MAX:           return _POSIX_AIO_MAX;            // Minimum requirement.
@@ -131,8 +139,8 @@ long sysconf(int name) {
     case _SC_THREAD_DESTRUCTOR_ITERATIONS: return PTHREAD_DESTRUCTOR_ITERATIONS;
     case _SC_THREAD_KEYS_MAX:   return PTHREAD_KEYS_MAX;
     case _SC_THREAD_STACK_MIN:    return PTHREAD_STACK_MIN;
-    case _SC_THREAD_THREADS_MAX:  return PTHREAD_THREADS_MAX;
-    case _SC_TTY_NAME_MAX:        return 32;  // Seems default on linux.
+    case _SC_THREAD_THREADS_MAX:  return -1; // No specific limit.
+    case _SC_TTY_NAME_MAX:        return 32; // Seems default on linux.
     case _SC_THREADS:             return _POSIX_THREADS;
     case _SC_THREAD_ATTR_STACKADDR:   return _POSIX_THREAD_ATTR_STACKADDR;
     case _SC_THREAD_ATTR_STACKSIZE:   return _POSIX_THREAD_ATTR_STACKSIZE;
@@ -140,11 +148,7 @@ long sysconf(int name) {
     case _SC_THREAD_PRIO_INHERIT: return _POSIX_THREAD_PRIO_INHERIT;
     case _SC_THREAD_PRIO_PROTECT: return _POSIX_THREAD_PRIO_PROTECT;
     case _SC_THREAD_SAFE_FUNCTIONS:  return _POSIX_THREAD_SAFE_FUNCTIONS;
-    case _SC_NPROCESSORS_CONF:  return get_nprocs_conf();
-    case _SC_NPROCESSORS_ONLN:  return get_nprocs();
-    case _SC_PHYS_PAGES:        return get_phys_pages();
-    case _SC_AVPHYS_PAGES:      return get_avphys_pages();
-    case _SC_MONOTONIC_CLOCK:   return __sysconf_monotonic_clock();
+    case _SC_MONOTONIC_CLOCK:   return _POSIX_VERSION;
 
     case _SC_2_PBS:             return -1;     // Obsolescent in POSIX.1-2008.
     case _SC_2_PBS_ACCOUNTING:  return -1;     // Obsolescent in POSIX.1-2008.
@@ -155,8 +159,7 @@ long sysconf(int name) {
     case _SC_ADVISORY_INFO:     return _POSIX_ADVISORY_INFO;
     case _SC_BARRIERS:          return _POSIX_BARRIERS;
     case _SC_CLOCK_SELECTION:   return _POSIX_CLOCK_SELECTION;
-    case _SC_CPUTIME:
-      return __sysconf_has_clock(CLOCK_PROCESS_CPUTIME_ID) ?_POSIX_VERSION : -1;
+    case _SC_CPUTIME:           return _POSIX_VERSION;
 
     case _SC_HOST_NAME_MAX:     return _POSIX_HOST_NAME_MAX;    // Minimum requirement.
     case _SC_IPV6:              return _POSIX_IPV6;
@@ -169,8 +172,7 @@ long sysconf(int name) {
     case _SC_SPORADIC_SERVER:   return _POSIX_SPORADIC_SERVER;
     case _SC_SS_REPL_MAX:       return -1;
     case _SC_SYMLOOP_MAX:       return _POSIX_SYMLOOP_MAX;      // Minimum requirement.
-    case _SC_THREAD_CPUTIME:
-      return __sysconf_has_clock(CLOCK_THREAD_CPUTIME_ID) ? _POSIX_VERSION : -1;
+    case _SC_THREAD_CPUTIME:    return _POSIX_VERSION;
 
     case _SC_THREAD_PROCESS_SHARED: return _POSIX_THREAD_PROCESS_SHARED;
     case _SC_THREAD_ROBUST_PRIO_INHERIT:  return _POSIX_THREAD_ROBUST_PRIO_INHERIT;

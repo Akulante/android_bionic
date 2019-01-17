@@ -68,11 +68,6 @@
         cmp     r2, #16
         blo     .L_copy_less_than_16_unknown_align
 
-        // TODO: The aligned copy code is extremely slow copying some large
-        //       buffers so always go through the unaligned path for now.
-        //cmp     r2, #832
-        //bge     .L_check_alignment
-
 .L_copy_unknown_alignment:
         // Unknown alignment of src and dst.
         // Assumes that the first few bytes have already been prefetched.
@@ -157,6 +152,7 @@
         strbcs      lr, [r0]
 
         pop         {r0, pc}
+<<<<<<< HEAD
 
 .L_check_alignment:
         // If src and dst cannot both be aligned to a word boundary,
@@ -332,3 +328,5 @@
         .cfi_restore r7
         .cfi_restore r8
         .cfi_restore r9
+=======
+>>>>>>> android_bionic/lineage-15.1

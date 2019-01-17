@@ -54,8 +54,6 @@ __RCSID("$NetBSD: getnameinfo.c,v 1.53 2012/09/26 23:13:00 christos Exp $");
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <net/if.h>
-#include <net/if_ieee1394.h>
-#include <net/if_types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <assert.h>
@@ -64,7 +62,6 @@ __RCSID("$NetBSD: getnameinfo.c,v 1.53 2012/09/26 23:13:00 christos Exp $");
 #include <arpa/nameser.h>
 #include "resolv_netid.h"
 #include "resolv_private.h"
-#include <sys/system_properties.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
@@ -303,7 +300,10 @@ getnameinfo_inet(const struct sockaddr* sa, socklen_t salen,
 			break;
 		}
 	} else {
-		hp = android_gethostbyaddrfornet_proxy(addr, afd->a_addrlen, afd->a_af, netid, mark);
+		// This code should only run in the app context, not inside netd, so netid is
+		// the app's netid.  netd doesn't use getnameinfo for network requests.
+		const struct android_net_context netcontext = { .app_netid = netid, .app_mark = mark };
+		hp = android_gethostbyaddrfornetcontext_proxy(addr, afd->a_addrlen, afd->a_af, &netcontext);
 		if (hp) {
 #if 0
 			/*

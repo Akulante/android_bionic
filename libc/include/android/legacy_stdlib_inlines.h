@@ -29,9 +29,14 @@
 #ifndef _ANDROID_LEGACY_STDLIB_INLINES_H_
 #define _ANDROID_LEGACY_STDLIB_INLINES_H_
 
+#include <stdlib.h>
 #include <sys/cdefs.h>
 
+#if __ANDROID_API__ < __ANDROID_API_L__
+
 __BEGIN_DECLS
+
+__noreturn void _Exit(int) __RENAME(_exit);
 
 static __inline float strtof(const char *nptr, char **endptr) {
   return (float)strtod(nptr, endptr);
@@ -61,4 +66,5 @@ static __inline int grantpt(int __fd __attribute((unused))) {
 
 __END_DECLS
 
+#endif
 #endif /* _ANDROID_LEGACY_STDLIB_INLINES_H_ */

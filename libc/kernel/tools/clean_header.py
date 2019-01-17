@@ -73,92 +73,57 @@ import sys, cpp, kernel, glob, os, re, getopt
 from defaults import *
 from utils import *
 
-noUpdate = 1
+def print_error(no_update, msg):
+    if no_update:
+        panic(msg)
+    sys.stderr.write("warning: " + msg)
 
-def cleanupFile(path, original_path):
+
+def cleanupFile(dst_file, src_file, rel_path, no_update = True):
     """reads an original header and perform the cleanup operation on it
        this functions returns the destination path and the clean header
        as a single string"""
-    # check the header path
-    src_path = path
-
-    if not os.path.exists(src_path):
-        if noUpdate:
-            panic( "file does not exist: '%s'\n" % path )
-        sys.stderr.write( "warning: file does not exit: %s\n" % path )
+    # Check the header path
+    if not os.path.exists(src_file):
+        print_error(no_update, "'%s' does not exist\n" % src_file)
         return None, None
 
-    if not os.path.isfile(src_path):
-        if noUpdate:
-            panic( "path is not a file: '%s'\n" % path )
-        sys.stderr.write( "warning: not a file: %s\n" % path )
+    if not os.path.isfile(src_file):
+        print_error(no_update, "'%s' is not a file\n" % src_file)
         return None, None
 
-    if os.path.commonprefix( [ src_path, original_path ] ) != original_path:
-        if noUpdate:
-            panic( "file is not in 'original' directory: %s\n" % path );
-        sys.stderr.write( "warning: file not in 'original' ignored: %s\n" % path )
-        return None, None
-
-    src_path = src_path[len(original_path):]
-    if len(src_path) > 0 and src_path[0] == '/':
-        src_path = src_path[1:]
-
-    if len(src_path) == 0:
-        panic( "oops, internal error, can't extract correct relative path\n" )
-
-    # convert into destination path, extracting architecture if needed
-    # and the corresponding list of known static functions
-    #
+    # Extract the architecture if found.
     arch = None
     statics = kernel_known_generic_statics
-    m = re.match(r"asm-([\w\d_\+\.\-]+)(/.*)", src_path)
-    if m and m.group(1) != 'generic':
-        dst_path = "arch-%s/asm/%s" % m.groups()
-        arch     = m.group(1)
-        statics  = statics.union( kernel_known_statics.get( arch, set() ) )
-    else:
-        # process headers under the uapi directory
-        # note the "asm" level has been explicitly added in the original
-        # kernel header tree for architectural-dependent uapi headers
-        m_uapi = re.match(r"(uapi)/([\w\d_\+\.\-]+)(/.*)", src_path)
-        if m_uapi:
-            dst_path = src_path
-            m_uapi_arch = re.match(r"asm-([\w\d_\+\.\-]+)", m_uapi.group(2))
-            if m_uapi_arch and m_uapi_arch.group(1) != 'generic':
-                arch     = m_uapi_arch.group(1)
-                statics  = statics.union( kernel_known_statics.get( arch, set() ) )
-        # common headers (ie non-asm and non-uapi)
-        else:
-            dst_path = "common/" + src_path
+    m = re.search(r"(^|/)asm-([\w\d_\+\.\-]+)/.*", rel_path)
+    if m and m.group(2) != 'generic':
+        arch = m.group(2)
+        statics = statics.union(kernel_known_statics.get(arch, set()))
 
-    dst_path = os.path.normpath( kernel_cleaned_path + "/" + dst_path )
-
-    # now, let's parse the file
-    #
+    # Now, let's parse the file.
     parser = cpp.BlockParser()
-    blocks = parser.parseFile(path)
+    blocks = parser.parseFile(src_file)
     if not parser.parsed:
-        sys.stderr.write( "error: can't parse '%s'" % path )
-        sys.exit(1)
+        print_error(no_update, "Can't parse '%s'" % src_file)
+        return None
 
     macros = kernel_known_macros.copy()
     if arch and arch in kernel_default_arch_macros:
         macros.update(kernel_default_arch_macros[arch])
 
     if arch and arch in kernel_arch_token_replacements:
-        blocks.replaceTokens( kernel_arch_token_replacements[arch] )
+        blocks.replaceTokens(kernel_arch_token_replacements[arch])
 
-    blocks.optimizeMacros( macros )
+    blocks.optimizeMacros(macros)
     blocks.optimizeIf01()
-    blocks.removeVarsAndFuncs( statics )
-    blocks.replaceTokens( kernel_token_replacements )
-    blocks.removeMacroDefines( kernel_ignored_macros )
+    blocks.removeVarsAndFuncs(statics)
+    blocks.replaceTokens(kernel_token_replacements)
+    blocks.removeMacroDefines(kernel_ignored_macros)
 
     out = StringOutput()
-    out.write( kernel_disclaimer )
-    blocks.writeWithWarning(out, kernel_warning, 4)
-    return dst_path, out.get()
+    out.write(kernel_disclaimer)
+    blocks.write(out)
+    return out.get()
 
 
 if __name__ == "__main__":
@@ -183,43 +148,50 @@ if __name__ == "__main__":
         sys.exit(1)
 
     try:
-        optlist, args = getopt.getopt( sys.argv[1:], 'uvk:d:' )
+        optlist, args = getopt.getopt(sys.argv[1:], 'uvk:d:')
     except:
         # unrecognized option
-        sys.stderr.write( "error: unrecognized option\n" )
+        sys.stderr.write("error: unrecognized option\n")
         usage()
 
+    no_update = True
+    dst_dir = get_kernel_dir()
+    src_dir = get_kernel_headers_original_dir()
     for opt, arg in optlist:
         if opt == '-u':
-            noUpdate = 0
+            no_update = False
         elif opt == '-v':
             logging.basicConfig(level=logging.DEBUG)
         elif opt == '-k':
-            kernel_original_path = arg
+            src_dir = arg
         elif opt == '-d':
-            kernel_cleaned_path = arg
+            dst_dir = arg
 
     if len(args) == 0:
         usage()
 
-    if noUpdate:
+    if no_update:
         for path in args:
-            dst_path, newdata = cleanupFile(path,kernel_original_path)
-            print newdata
+            dst_file = os.path.join(dst_dir, path)
+            src_file = os.path.join(src_dir, path)
+            new_data = cleanupFile(dst_file, src_file, path)
+            print new_data
 
         sys.exit(0)
 
-    # now let's update our files.
+    # Now let's update our files.
 
     b = BatchFileUpdater()
 
     for path in args:
-        dst_path, newdata = cleanupFile(path,kernel_original_path)
-        if not dst_path:
+        dst_file = os.path.join(dst_dir, path)
+        src_file = os.path.join(src_dir, path)
+        new_data = cleanupFile(dst_file, src_file, path, no_update)
+        if not new_data:
             continue
 
-        b.readFile( dst_path )
-        r = b.editFile( dst_path, newdata )
+        b.readFile(path)
+        r = b.editFile(path, new_data)
         if r == 0:
             r = "unchanged"
         elif r == 1:
@@ -227,7 +199,7 @@ if __name__ == "__main__":
         else:
             r = "added"
 
-        print "cleaning: %-*s -> %-*s (%s)" % ( 35, path, 35, dst_path, r )
+        print "cleaning: %-*s -> %-*s (%s)" % (35, path, 35, path, r)
 
 
     b.updateGitFiles()

@@ -24,6 +24,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+<<<<<<< HEAD
 #ifdef PLDOFFS
 #undef PLDOFFS
 #endif
@@ -38,10 +39,15 @@
 #undef BBTHRESH
 #endif
 #define BBTHRESH (2048/128)
+=======
+#define PLDOFFS 	(16)
+#define PLDSIZE 	(128)
+>>>>>>> android_bionic/lineage-15.1
 
 #if (PLDOFFS < 1)
 #error Routine does not support offsets less than 1
 #endif
+<<<<<<< HEAD
 #if (PLDTHRESH < PLDOFFS)
 #error PLD threshold must be greater than or equal to the PLD offset
 #endif
@@ -63,11 +69,30 @@ kryo_bb_memcpy:
 	blo	kryo_bb_copy_32_a
 	cmp	x2, #128
 	blo	kryo_bb_copy_64_a
+=======
+
+.L_kryo_bb_memcpy:
+	mov	x11, x0
+	cmp	x2, #4
+	blo	.L_kryo_bb_lt4
+	cmp	x2, #16
+	blo	.L_kryo_bb_lt16
+	cmp	x2, #32
+	blo	.L_kryo_bb_16
+	cmp	x2, #64
+	blo	.L_kryo_bb_copy_32_a
+	cmp	x2, #128
+	blo	.L_kryo_bb_copy_64_a
+>>>>>>> android_bionic/lineage-15.1
 
 	// we have at least 127 bytes to achieve 128-byte alignment
 	neg	x3, x1			// calculate count to get SOURCE aligned
 	ands	x3, x3, #0x7F
+<<<<<<< HEAD
 	b.eq	kryo_bb_source_aligned	// already aligned
+=======
+	b.eq	.L_kryo_bb_source_aligned	// already aligned
+>>>>>>> android_bionic/lineage-15.1
 	// alignment fixup, small to large (favorable alignment)
 	tbz	x3, #0, 1f
 	ldrb	w5, [x1], #1
@@ -84,14 +109,22 @@ kryo_bb_memcpy:
 4:	tbz	x3, #4, 5f
 	ldr	q7, [x1], #16
 	str	q7, [x0], #16
+<<<<<<< HEAD
 5:	tbz	x3, #5, 55f
 	ldp	q0, q1, [x1], #32
 	stp	q0, q1, [x0], #32
 55:	tbz	x3, #6, 6f
+=======
+5:	tbz	x3, #5, 6f
+	ldp	q0, q1, [x1], #32
+	stp	q0, q1, [x0], #32
+6:	tbz	x3, #6, 7f
+>>>>>>> android_bionic/lineage-15.1
 	ldp	q0, q1, [x1], #32
 	ldp	q2, q3, [x1], #32
 	stp	q0, q1, [x0], #32
 	stp	q2, q3, [x0], #32
+<<<<<<< HEAD
 6:	subs	x2, x2, x3		// fixup count after alignment
 	b.eq	kryo_bb_exit
 	cmp	x2, #128
@@ -103,6 +136,19 @@ kryo_bb_source_aligned:
 
 	cmp	x12, #BBTHRESH
 	bls	kryo_bb_prime_pump
+=======
+7:	subs	x2, x2, x3		// fixup count after alignment
+	b.eq	.L_kryo_bb_exit
+	cmp	x2, #128
+	blo	.L_kryo_bb_copy_64_a
+.L_kryo_bb_source_aligned:
+	lsr	x12, x2, #7
+	cmp	x12, #PLDOFFS
+	bls	.L_kryo_bb_copy_128_loop_nopld
+
+	cmp	x12, #PLDOFFS
+	bls	.L_kryo_bb_prime_pump
+>>>>>>> android_bionic/lineage-15.1
 
 	add	x14, x0, #0x400
 	add	x9,  x1, #(PLDOFFS*PLDSIZE)
@@ -111,12 +157,20 @@ kryo_bb_source_aligned:
 	lsr	x14, x14, #(21+32)
 	add	x14, x14, #(PLDOFFS*PLDSIZE)
 	cmp	x12, x14, lsr #7
+<<<<<<< HEAD
 	bls	kryo_bb_prime_pump
+=======
+	bls	.L_kryo_bb_prime_pump
+>>>>>>> android_bionic/lineage-15.1
 
 	mov	x9, #(PLDOFFS)
 	lsr     x13, x14, #7
 	subs    x9, x13, x9
+<<<<<<< HEAD
 	bls	kryo_bb_prime_pump
+=======
+	bls	.L_kryo_bb_prime_pump
+>>>>>>> android_bionic/lineage-15.1
 
 	add	x10, x1, x14
 	bic	x10, x10, #0x7F		// Round to multiple of PLDSIZE
@@ -130,7 +184,11 @@ kryo_bb_source_aligned:
 
 	prfm	PLDL1STRM, [x1, #((PLDOFFS-1)*PLDSIZE)]
 	prfm	PLDL1STRM, [x1, #((PLDOFFS-1)*PLDSIZE+64)]
+<<<<<<< HEAD
 kryo_bb_copy_128_loop_outer_doublepld:
+=======
+.L_kryo_bb_copy_128_loop_outer_doublepld:
+>>>>>>> android_bionic/lineage-15.1
 	prfm	PLDL1STRM, [x1, #((PLDOFFS)*PLDSIZE)]
 	prfm	PLDL1STRM, [x1, #((PLDOFFS)*PLDSIZE)+64]
 	subs	x9, x9, #1
@@ -145,6 +203,7 @@ kryo_bb_copy_128_loop_outer_doublepld:
 	stp	q2, q3, [x0], #32
 	stp	q4, q5, [x0], #32
 	stp	q6, q7, [x0], #32
+<<<<<<< HEAD
 	bne	kryo_bb_copy_128_loop_outer_doublepld
 	cmp	x12, #0
 	beq	kryo_bb_pop_before_nopld
@@ -152,6 +211,15 @@ kryo_bb_copy_128_loop_outer_doublepld:
 	bls	kryo_bb_copy_128_loop_outer
 
 kryo_bb_copy_128_loop_ddr:
+=======
+	bne	.L_kryo_bb_copy_128_loop_outer_doublepld
+	cmp	x12, #0
+	beq	.L_kryo_bb_pop_before_nopld
+	cmp	x12, #(448*1024/128)
+	bls	.L_kryo_bb_copy_128_loop_outer
+
+.L_kryo_bb_copy_128_loop_ddr:
+>>>>>>> android_bionic/lineage-15.1
 	subs	x12, x12, #1
 	ldr	x3, [x10], #128
 	ldp	q0, q1, [x1], #32
@@ -162,20 +230,36 @@ kryo_bb_copy_128_loop_ddr:
 	stp	q2, q3, [x0], #32
 	stp	q4, q5, [x0], #32
 	stp	q6, q7, [x0], #32
+<<<<<<< HEAD
 	bne	kryo_bb_copy_128_loop_ddr
 	b	kryo_bb_pop_before_nopld
 
 kryo_bb_prime_pump:
+=======
+	bne	.L_kryo_bb_copy_128_loop_ddr
+	b	.L_kryo_bb_pop_before_nopld
+
+.L_kryo_bb_prime_pump:
+>>>>>>> android_bionic/lineage-15.1
 	mov	x14, #(PLDOFFS*PLDSIZE)
 	add	x10, x1, #(PLDOFFS*PLDSIZE)
 	bic	x10, x10, #0x7F
 	sub	x12, x12, #PLDOFFS
+<<<<<<< HEAD
 	prfm	PLDL1KEEP, [x10, #((PLDOFFS-1)*PLDSIZE)]
 	prfm	PLDL1KEEP, [x10, #((PLDOFFS-1)*PLDSIZE)+64]
 	cmp	x12, #(448*1024/128)
 	bhi	kryo_bb_copy_128_loop_ddr
 
 kryo_bb_copy_128_loop_outer:
+=======
+	prfum	PLDL1KEEP, [x10, #(-1*PLDSIZE)]
+	prfum	PLDL1KEEP, [x10, #(-1*PLDSIZE+64)]
+	cmp	x12, #(448*1024/128)
+	bhi	.L_kryo_bb_copy_128_loop_ddr
+
+.L_kryo_bb_copy_128_loop_outer:
+>>>>>>> android_bionic/lineage-15.1
 	subs	x12, x12, #1
 	prfm	PLDL1KEEP, [x10]
 	prfm	PLDL1KEEP, [x10, #64]
@@ -188,11 +272,19 @@ kryo_bb_copy_128_loop_outer:
 	stp	q2, q3, [x0], #32
 	stp	q4, q5, [x0], #32
 	stp	q6, q7, [x0], #32
+<<<<<<< HEAD
 	bne	kryo_bb_copy_128_loop_outer
 
 kryo_bb_pop_before_nopld:
 	lsr	x12, x14, #7
 kryo_bb_copy_128_loop_nopld:
+=======
+	bne	.L_kryo_bb_copy_128_loop_outer
+
+.L_kryo_bb_pop_before_nopld:
+	lsr	x12, x14, #7
+.L_kryo_bb_copy_128_loop_nopld:
+>>>>>>> android_bionic/lineage-15.1
 	ldp	q0, q1, [x1], #32
 	ldp	q2, q3, [x1], #32
 	ldp	q4, q5, [x1], #32
@@ -202,16 +294,26 @@ kryo_bb_copy_128_loop_nopld:
 	stp	q2, q3, [x0], #32
 	stp	q4, q5, [x0], #32
 	stp	q6, q7, [x0], #32
+<<<<<<< HEAD
 	bne	kryo_bb_copy_128_loop_nopld
 	ands	x2, x2, #0x7f
 	beq	kryo_bb_exit
 
 kryo_bb_copy_64_a:
 	tbz	x2, #6, kryo_bb_copy_32_a
+=======
+	bne	.L_kryo_bb_copy_128_loop_nopld
+	ands	x2, x2, #0x7f
+	beq	.L_kryo_bb_exit
+
+.L_kryo_bb_copy_64_a:
+	tbz	x2, #6, .L_kryo_bb_copy_32_a
+>>>>>>> android_bionic/lineage-15.1
 	ldp	q0, q1, [x1], #32
 	ldp	q2, q3, [x1], #32
 	stp	q0, q1, [x0], #32
 	stp	q2, q3, [x0], #32
+<<<<<<< HEAD
 kryo_bb_copy_32_a:
 	tbz	x2, #5, kryo_bb_16
 	ldp	q0, q1, [x1], #32
@@ -242,3 +344,34 @@ kryo_bb_exit:
 	mov	x0, x11
 	ret
 
+=======
+.L_kryo_bb_copy_32_a:
+	tbz	x2, #5, .L_kryo_bb_16
+	ldp	q0, q1, [x1], #32
+	stp	q0, q1, [x0], #32
+.L_kryo_bb_16:
+	tbz	x2, #4, .L_kryo_bb_lt16
+	ldr	q7, [x1], #16
+	str	q7, [x0], #16
+	ands	x2, x2, #0x0f
+	beq	.L_kryo_bb_exit
+.L_kryo_bb_lt16:
+	tbz	x2, #3, .L_kryo_bb_lt8
+	ldr	x3, [x1], #8
+	str	x3, [x0], #8
+.L_kryo_bb_lt8:
+	tbz	x2, #2, .L_kryo_bb_lt4
+	ldr	w3, [x1], #4
+	str	w3, [x0], #4
+.L_kryo_bb_lt4:
+	tbz	x2, #1, .L_kryo_bb_lt2
+	ldrh	w3, [x1], #2
+	strh	w3, [x0], #2
+.L_kryo_bb_lt2:
+	tbz	x2, #0, .L_kryo_bb_exit
+	ldrb	w3, [x1], #1
+	strb	w3, [x0], #1
+.L_kryo_bb_exit:
+	mov	x0, x11
+	ret
+>>>>>>> android_bionic/lineage-15.1

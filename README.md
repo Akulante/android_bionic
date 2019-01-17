@@ -96,7 +96,6 @@ libc/
   dns/
     # Contains the DNS resolver (originates from NetBSD code).
 
-  upstream-dlmalloc/
   upstream-freebsd/
   upstream-netbsd/
   upstream-openbsd/
@@ -118,6 +117,10 @@ libc/
     # legacy mess that needs to be sorted out, either by replacing it with
     # current upstream source in one of the upstream directories or by
     # switching the file to C++ and cleaning it up.
+
+  malloc_debug/
+    # The code that implements the functionality to enable debugging of
+    # native allocation problems.
 
   stdio/
     # These are legacy files of dubious provenance. We're working to clean
@@ -150,10 +153,13 @@ Adding a system call usually involves:
      the appropriate POSIX header file in libc/include/ includes the
      relevant file or files.
   4. Add function declarations to the appropriate header file.
-  5. Add at least basic tests. Even a test that deliberately supplies
+  5. Add the function name to the correct section in libc/libc.map.txt and
+     run `./libc/tools/genversion-scripts.py`.
+  6. Add at least basic tests. Even a test that deliberately supplies
      an invalid argument helps check that we're generating the right symbol
-     and have the right declaration in the header file. (And strace(1) can
-     confirm that the correct system call is being made.)
+     and have the right declaration in the header file, and that you correctly
+     updated the maps in step 5. (You can use strace(1) to confirm that the
+     correct system call is being made.)
 
 
 Updating kernel header files
@@ -169,9 +175,10 @@ As mentioned above, this is currently a two-step process:
 Updating tzdata
 ---------------
 
-This is fully automated:
+This is fully automated (and these days handled by the libcore team, because
+they own icu, and that needs to be updated in sync with bionic):
 
-  1. Run update-tzdata.py.
+  1. Run update-tzdata.py in external/icu/tools/.
 
 
 Verifying changes
@@ -193,33 +200,64 @@ The tests are all built from the tests/ directory.
 
 ### Device tests
 
-    $ mma
-    $ adb sync
+    $ mma # In $ANDROID_ROOT/bionic.
+    $ adb root && adb remount && adb sync
     $ adb shell /data/nativetest/bionic-unit-tests/bionic-unit-tests32
     $ adb shell \
         /data/nativetest/bionic-unit-tests-static/bionic-unit-tests-static32
     # Only for 64-bit targets
-    $ adb shell /data/nativetest/bionic-unit-tests/bionic-unit-tests64
+    $ adb shell /data/nativetest64/bionic-unit-tests/bionic-unit-tests64
     $ adb shell \
-        /data/nativetest/bionic-unit-tests-static/bionic-unit-tests-static64
+        /data/nativetest64/bionic-unit-tests-static/bionic-unit-tests-static64
+
+Note that we use our own custom gtest runner that offers a superset of the
+options documented at
+<https://github.com/google/googletest/blob/master/googletest/docs/AdvancedGuide.md#running-test-programs-advanced-options>,
+in particular for test isolation and parallelism (both on by default).
+
+### Device tests via CTS
+
+Most of the unit tests are executed by CTS. By default, CTS runs as
+a non-root user, so the unit tests must also pass when not run as root.
+Some tests cannot do any useful work unless run as root. In this case,
+the test should check `getuid() == 0` and do nothing otherwise (typically
+we log in this case to prevent accidents!). Obviously, if the test can be
+rewritten to not require root, that's an even better solution.
+
+Currently, the list of bionic CTS tests is generated at build time by
+running a host version of the test executable and dumping the list of
+all tests. In order for this to continue to work, all architectures must
+have the same number of tests, and the host version of the executable
+must also have the same number of tests.
+
+Running the gtests directly is orders of magnitude faster than using CTS,
+but in cases where you really have to run CTS:
+
+    $ make cts # In $ANDROID_ROOT.
+    $ adb unroot # Because real CTS doesn't run as root.
+    # This will sync any *test* changes, but not *code* changes:
+    $ cts-tradefed \
+        run singleCommand cts --skip-preconditions -m CtsBionicTestCases
 
 ### Host tests
 
 The host tests require that you have `lunch`ed either an x86 or x86_64 target.
+Note that due to ABI limitations (specifically, the size of pthread_mutex_t),
+32-bit bionic requires PIDs less than 65536. To enforce this, set /proc/sys/kernel/pid_max
+to 65536.
 
-    $ mma
-    $ mm bionic-unit-tests-run-on-host32
-    $ mm bionic-unit-tests-run-on-host64  # For 64-bit *targets* only.
+    $ ./tests/run-on-host.sh 32
+    $ ./tests/run-on-host.sh 64   # For x86_64-bit *targets* only.
+
+You can supply gtest flags as extra arguments to this script.
 
 ### Against glibc
 
 As a way to check that our tests do in fact test the correct behavior (and not
 just the behavior we think is correct), it is possible to run the tests against
-the host's glibc. The executables are already in your path.
+the host's glibc.
 
-    $ mma
-    $ bionic-unit-tests-glibc32
-    $ bionic-unit-tests-glibc64
+    $ ./tests/run-on-host.sh glibc
 
 
 Gathering test coverage
@@ -256,18 +294,87 @@ First, build and run the host tests as usual (see above).
 The coverage report is now available at `covreport/index.html`.
 
 
-LP32 ABI bugs
--------------
+Running the benchmarks
+----------------------
 
-This probably belongs in the NDK documentation rather than here, but these
-are the known ABI bugs in LP32:
+### Device benchmarks
 
- * `time_t` is 32-bit. <http://b/5819737>
+    $ mma
+    $ adb remount
+    $ adb sync
+    $ adb shell /data/nativetest/bionic-benchmarks/bionic-benchmarks
+    $ adb shell /data/nativetest64/bionic-benchmarks/bionic-benchmarks
 
- * `off_t` is 32-bit. There is `off64_t`, but no `_FILE_OFFSET_BITS` support.
-   Many of the `off64_t` functions are missing in older releases, and
-   stdio uses 32-bit offsets, so there's no way to fully implement
-   `_FILE_OFFSET_BITS`.
+You can use `--benchmark_filter=getpid` to just run benchmarks with "getpid"
+in their name.
 
- * `sigset_t` is too small on ARM and x86 (but correct on MIPS), so support
-   for real-time signals is broken. <http://b/5828899>
+### Host benchmarks
+
+See the "Host tests" section of "Running the tests" above.
+
+
+Attaching GDB to the tests
+--------------------------
+
+Bionic's test runner will run each test in its own process by default to prevent
+tests failures from impacting other tests. This also has the added benefit of
+running them in parallel, so they are much faster.
+
+However, this also makes it difficult to run the tests under GDB. To prevent
+each test from being forked, run the tests with the flag `--no-isolate`.
+
+
+32-bit ABI bugs
+---------------
+
+### `off_t` is 32-bit.
+
+On 32-bit Android, `off_t` is a signed 32-bit integer. This limits functions
+that use `off_t` to working on files no larger than 2GiB.
+
+Android does not require the `_LARGEFILE_SOURCE` macro to be used to make
+`fseeko` and `ftello` available. Instead they're always available from API
+level 24 where they were introduced, and never available before then.
+
+Android also does not require the `_LARGEFILE64_SOURCE` macro to be used
+to make `off64_t` and corresponding functions such as `ftruncate64` available.
+Instead, whatever subset of those functions was available at your target API
+level will be visible.
+
+There are a couple of exceptions to note. Firstly, `off64_t` and the single
+function `lseek64` were available right from the beginning in API 3. Secondly,
+Android has always silently inserted `O_LARGEFILE` into any open call, so if
+all you need are functions like `read` that don't take/return `off_t`, large
+files have always worked.
+
+Android support for `_FILE_OFFSET_BITS=64` (which turns `off_t` into `off64_t`
+and replaces each `off_t` function with its `off64_t` counterpart, such as
+`lseek` in the source becoming `lseek64` at runtime) was added late. Even when
+it became available for the platform, it wasn't available from the NDK until
+r15. Before NDK r15, `_FILE_OFFSET_BITS=64` silently did nothing: all code
+compiled with that was actually using a 32-bit `off_t`. With a new enough NDK,
+the situation becomes complicated. If you're targeting an API before 21, almost
+all functions that take an `off_t` become unavailable. You've asked for their
+64-bit equivalents, and none of them (except `lseek`/`lseek64`) exist. As you
+increase your target API level, you'll have more and more of the functions
+available. API 12 adds some of the `<unistd.h>` functions, API 21 adds `mmap`,
+and by API 24 you have everything including `<stdio.h>`. See the
+[linker map](libc/libc.map.txt) for full details.
+
+In the 64-bit ABI, `off_t` is always 64-bit.
+
+### `sigset_t` is too small for real-time signals.
+
+On 32-bit Android, `sigset_t` is too small for ARM and x86 (but correct for
+MIPS). This means that there is no support for real-time signals in 32-bit
+code.
+
+In the 64-bit ABI, `sigset_t` is the correct size for every architecture.
+
+### `time_t` is 32-bit.
+
+On 32-bit Android, `time_t` is 32-bit. The header `<time64.h>` and type
+`time64_t` exist as a workaround, but the kernel interfaces exposed on 32-bit
+Android all use the 32-bit `time_t`.
+
+In the 64-bit ABI, `time_t` is 64-bit.

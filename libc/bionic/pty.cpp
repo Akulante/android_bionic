@@ -36,10 +36,7 @@
 #include <unistd.h>
 #include <utmp.h>
 
-#include "private/ThreadLocalBuffer.h"
-
-static ThreadLocalBuffer<char, 32> g_ptsname_tls_buffer;
-static ThreadLocalBuffer<char, 64> g_ttyname_tls_buffer;
+#include "bionic/pthread_internal.h"
 
 int getpt() {
   return posix_openpt(O_RDWR|O_NOCTTY);
@@ -54,8 +51,9 @@ int posix_openpt(int flags) {
 }
 
 char* ptsname(int fd) {
-  char* buf = g_ptsname_tls_buffer.get();
-  int error = ptsname_r(fd, buf, g_ptsname_tls_buffer.size());
+  bionic_tls& tls = __get_bionic_tls();
+  char* buf = tls.ptsname_buf;
+  int error = ptsname_r(fd, buf, sizeof(tls.ptsname_buf));
   return (error == 0) ? buf : NULL;
 }
 
@@ -80,8 +78,9 @@ int ptsname_r(int fd, char* buf, size_t len) {
 }
 
 char* ttyname(int fd) {
-  char* buf = g_ttyname_tls_buffer.get();
-  int error = ttyname_r(fd, buf, g_ttyname_tls_buffer.size());
+  bionic_tls& tls = __get_bionic_tls();
+  char* buf = tls.ttyname_buf;
+  int error = ttyname_r(fd, buf, sizeof(tls.ttyname_buf));
   return (error == 0) ? buf : NULL;
 }
 
@@ -151,22 +150,24 @@ int openpty(int* master, int* slave, char* name, const termios* t, const winsize
   return 0;
 }
 
-int forkpty(int* master, char* name, const termios* t, const winsize* ws) {
+int forkpty(int* amaster, char* name, const termios* t, const winsize* ws) {
+  int master;
   int slave;
-  if (openpty(master, &slave, name, t, ws) == -1) {
+  if (openpty(&master, &slave, name, t, ws) == -1) {
     return -1;
   }
 
   pid_t pid = fork();
   if (pid == -1) {
-    close(*master);
+    close(master);
     close(slave);
     return -1;
   }
 
   if (pid == 0) {
     // Child.
-    close(*master);
+    *amaster = -1;
+    close(master);
     if (login_tty(slave) == -1) {
       _exit(1);
     }
@@ -174,6 +175,7 @@ int forkpty(int* master, char* name, const termios* t, const winsize* ws) {
   }
 
   // Parent.
+  *amaster = master;
   close(slave);
   return pid;
 }

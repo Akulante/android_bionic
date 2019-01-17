@@ -27,7 +27,10 @@
 
 /* Assumes neon instructions and a cache line size of 64 bytes. */
 
+<<<<<<< HEAD
 #include <machine/cpu-features.h>
+=======
+>>>>>>> android_bionic/lineage-15.1
 #include <machine/asm.h>
 
 #define PLDOFFS	(10)

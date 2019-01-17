@@ -1,17 +1,29 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
+ * All rights reserved.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #ifndef __LINKED_LIST_H
@@ -25,12 +37,49 @@ struct LinkedListEntry {
   T* element;
 };
 
+// ForwardInputIterator
+template<typename T>
+class LinkedListIterator {
+ public:
+  LinkedListIterator() : entry_(nullptr) {}
+  LinkedListIterator(const LinkedListIterator<T>& that) : entry_(that.entry_) {}
+  explicit LinkedListIterator(LinkedListEntry<T>* entry) : entry_(entry) {}
+
+  LinkedListIterator<T>& operator=(const LinkedListIterator<T>& that) {
+    entry_ = that.entry_;
+    return *this;
+  }
+
+  LinkedListIterator<T>& operator++() {
+    entry_ = entry_->next;
+    return *this;
+  }
+
+  T* const operator*() {
+    return entry_->element;
+  }
+
+  bool operator==(const LinkedListIterator<T>& that) const {
+    return entry_ == that.entry_;
+  }
+
+  bool operator!=(const LinkedListIterator<T>& that) const {
+    return entry_ != that.entry_;
+  }
+
+ private:
+  LinkedListEntry<T> *entry_;
+};
+
 /*
  * Represents linked list of objects of type T
  */
 template<typename T, typename Allocator>
 class LinkedList {
  public:
+  typedef LinkedListIterator<T> iterator;
+  typedef T* value_type;
+
   LinkedList() : head_(nullptr), tail_(nullptr) {}
   ~LinkedList() {
     clear();
@@ -99,6 +148,10 @@ class LinkedList {
     tail_ = nullptr;
   }
 
+  bool empty() {
+    return (head_ == nullptr);
+  }
+
   template<typename F>
   void for_each(F action) const {
     visit([&] (T* si) {
@@ -127,13 +180,25 @@ class LinkedList {
         } else {
           p->next = next;
         }
+
+        if (tail_ == e) {
+          tail_ = p;
+        }
+
         Allocator::free(e);
+
         e = next;
       } else {
         p = e;
         e = e->next;
       }
     }
+  }
+
+  void remove(T* element) {
+    remove_if([&](T* e) {
+      return e == element;
+    });
   }
 
   template<typename F>
@@ -145,6 +210,24 @@ class LinkedList {
     }
 
     return nullptr;
+  }
+
+  iterator begin() const {
+    return iterator(head_);
+  }
+
+  iterator end() const {
+    return iterator(nullptr);
+  }
+
+  iterator find(T* value) const {
+    for (LinkedListEntry<T>* e = head_; e != nullptr; e = e->next) {
+      if (e->element == value) {
+        return iterator(e);
+      }
+    }
+
+    return end();
   }
 
   size_t copy_to_array(T* array[], size_t array_length) const {

@@ -27,6 +27,10 @@
 #include <pthread.h>
 #include <signal.h>
 
+#include <async_safe/log.h>
+
+#include "private/bionic_prctl.h"
+
 // Android gets these from "thread_private.h".
 #include "thread_private.h"
 //static pthread_mutex_t arc4random_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -44,16 +48,10 @@ extern int __register_atfork(void (*)(void), void(*)(void), void (*)(void), void
 static inline void
 _getentropy_fail(void)
 {
-	raise(SIGKILL);
+	async_safe_fatal("getentropy failed");
 }
 
-static volatile sig_atomic_t _rs_forked;
-
-static inline void
-_rs_forkhandler(void)
-{
-	_rs_forked = 1;
-}
+volatile sig_atomic_t _rs_forked;
 
 static inline void
 _rs_forkdetect(void)
@@ -72,16 +70,21 @@ _rs_forkdetect(void)
 static inline int
 _rs_allocate(struct _rs **rsp, struct _rsx **rsxp)
 {
-	if ((*rsp = mmap(NULL, sizeof(**rsp), PROT_READ|PROT_WRITE,
+	// OpenBSD's arc4random_linux.h allocates two separate mappings, but for
+	// themselves they just allocate both structs into one mapping like this.
+	struct {
+		struct _rs rs;
+		struct _rsx rsx;
+	} *p;
+
+	if ((p = mmap(NULL, sizeof(*p), PROT_READ|PROT_WRITE,
 	    MAP_ANON|MAP_PRIVATE, -1, 0)) == MAP_FAILED)
 		return (-1);
 
-	if ((*rsxp = mmap(NULL, sizeof(**rsxp), PROT_READ|PROT_WRITE,
-	    MAP_ANON|MAP_PRIVATE, -1, 0)) == MAP_FAILED) {
-		munmap(*rsxp, sizeof(**rsxp));
-		return (-1);
-	}
+	prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, sizeof(*p), "arc4random data");
 
-	_ARC4_ATFORK(_rs_forkhandler);
+	*rsp = &p->rs;
+	*rsxp = &p->rsx;
+
 	return (0);
 }
